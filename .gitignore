@@ -1,0 +1,26 @@
+# Root .gitignore for EasyEDA AI Copilot
+
+# Python
+backend/__pycache__/
+backend/*.pyc
+backend/*.pyo
+backend/*.pyd
+backend/.env
+backend/venv/
+backend/env/
+
+# Node.js
+extension/node_modules/
+extension/dist/
+extension/build/
+extension/.env
+
+# Local IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,28 @@
+{
+  "name": "easyeda-ai-copilot",
+  "version": "1.0.0",
+  "description": "AI-powered circuit design assistant for EasyEDA using OpenRouter models",
+  "author": "EasyEDA AI Copilot Contributors",
+  "license": "MIT",
+  "scripts": {
+    "build": "node scripts/build.js",
+    "pack:extension": "node scripts/pack-extension.js",
+    "pack:plugin": "node scripts/pack-plugin.js",
+    "dev": "node scripts/dev-server.js"
+  },
+  "keywords": [
+    "easyeda",
+    "eda",
+    "pcb",
+    "schematic",
+    "ai",
+    "openrouter",
+    "circuit-design",
+    "browser-extension",
+    "electronics"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/abeypa/easyeda-ai-copilot"
+  }
+}

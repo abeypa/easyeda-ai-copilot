@@ -1,0 +1,14 @@
+{
+  "name": "EasyEDA AI Copilot",
+  "version": "1.0.0",
+  "description": "AI-powered circuit design assistant powered by OpenRouter. Get component recommendations, generate schematics, analyze your designs, and create BOMs with LCSC part numbers.",
+  "author": "EasyEDA AI Copilot",
+  "homepage": "https://github.com/abeypa/easyeda-ai-copilot",
+  "main": "index.html",
+  "platform": ["web"],
+  "category": "utility",
+  "edasdk": "5.0.0",
+  "hideTitle": false,
+  "minWidth": 380,
+  "minHeight": 600
+}

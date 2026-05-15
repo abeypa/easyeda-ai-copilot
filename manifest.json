@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "EasyEDA AI Copilot",
+  "version": "1.0.0",
+  "description": "AI-powered circuit design assistant for EasyEDA using OpenRouter models",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": [
+    "https://*.easyeda.com/*",
+    "https://*.lceda.cn/*",
+    "https://openrouter.ai/*"
+  ],
+  "background": {
+    "service_worker": "extension/background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.easyeda.com/*", "https://*.lceda.cn/*"],
+      "js": ["extension/content/content.js"],
+      "css": ["extension/content/content.css"],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_popup": "extension/popup/popup.html",
+    "default_icon": {
+      "16": "extension/icons/icon16.png",
+      "48": "extension/icons/icon48.png",
+      "128": "extension/icons/icon128.png"
+    },
+    "default_title": "EasyEDA AI Copilot"
+  },
+  "icons": {
+    "16": "extension/icons/icon16.png",
+    "48": "extension/icons/icon48.png",
+    "128": "extension/icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["plugin/*"],
+      "matches": ["https://*.easyeda.com/*", "https://*.lceda.cn/*"]
+    }
+  ]
+}

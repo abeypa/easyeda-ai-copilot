@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>EasyEDA AI Copilot</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="popup-container">
+    <!-- Header -->
+    <div class="popup-header">
+      <div class="brand">
+        <span class="brand-icon">⚡</span>
+        <div>
+          <div class="brand-name">EasyEDA AI Copilot</div>
+          <div class="brand-sub">Powered by OpenRouter</div>
+        </div>
+      </div>
+      <div class="status-dot" id="statusDot" title="API status"></div>
+    </div>
+
+    <!-- API Key Section -->
+    <div class="section">
+      <label class="field-label">OpenRouter API Key</label>
+      <div class="input-row">
+        <input type="password" id="apiKey" placeholder="sk-or-v1-…" autocomplete="off" />
+        <button class="icon-action" id="toggleKey">👁</button>
+      </div>
+      <div class="key-status" id="keyStatus"></div>
+      <a href="https://openrouter.ai/keys" target="_blank" class="helper-link">Get a free API key ↗</a>
+    </div>
+
+    <!-- Model Section -->
+    <div class="section">
+      <label class="field-label">AI Model</label>
+      <select id="modelSelect">
+        <optgroup label="Anthropic (Best for EDA)">
+          <option value="anthropic/claude-sonnet-4-5">Claude Sonnet 4.5 ⭐</option>
+          <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet</option>
+          <option value="anthropic/claude-3-haiku">Claude 3 Haiku (Fast)</option>
+          <option value="anthropic/claude-opus-4">Claude Opus 4 (Best)</option>
+        </optgroup>
+        <optgroup label="OpenAI">
+          <option value="openai/gpt-4o">GPT-4o</option>
+          <option value="openai/gpt-4o-mini">GPT-4o Mini</option>
+        </optgroup>
+        <optgroup label="Google">
+          <option value="google/gemini-pro-1.5">Gemini Pro 1.5</option>
+          <option value="google/gemini-flash-1.5">Gemini Flash 1.5</option>
+          <option value="google/gemini-2.0-flash-001">Gemini 2.0 Flash</option>
+        </optgroup>
+        <optgroup label="Free / Open Source">
+          <option value="meta-llama/llama-3.1-8b-instruct">Llama 3.1 8B (Free)</option>
+          <option value="deepseek/deepseek-r1">DeepSeek R1</option>
+          <option value="deepseek/deepseek-chat">DeepSeek V3</option>
+          <option value="mistralai/mistral-small">Mistral Small</option>
+        </optgroup>
+      </select>
+    </div>
+
+    <!-- Save Button -->
+    <button class="save-btn" id="saveBtn">Save Settings</button>
+
+    <!-- Divider -->
+    <div class="divider"></div>
+
+    <!-- Quick Launch -->
+    <div class="section">
+      <label class="field-label">Quick Launch</label>
+      <div class="launch-grid">
+        <button class="launch-btn" id="openEasyEDA">
+          <span>🖥</span> Open EasyEDA
+        </button>
+        <button class="launch-btn" id="openLCSC">
+          <span>🔍</span> Search LCSC
+        </button>
+        <button class="launch-btn" id="openJLCPCB">
+          <span>🏭</span> JLCPCB Parts
+        </button>
+        <button class="launch-btn" id="openDocs">
+          <span>📚</span> Plugin Docs
+        </button>
+      </div>
+    </div>
+
+    <!-- Info -->
+    <div class="popup-footer">
+      <span>v1.0.0</span>
+      <a href="https://github.com/abeypa/easyeda-ai-copilot" target="_blank">GitHub ↗</a>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

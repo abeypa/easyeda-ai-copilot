@@ -1,0 +1,60 @@
+/* EasyEDA AI Copilot — content script styles */
+
+#eai-toggle-btn {
+  position: fixed;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  z-index: 999998;
+  background: #1a1b1e;
+  border: 1px solid #373a40;
+  border-right: none;
+  border-radius: 8px 0 0 8px;
+  color: #c9cdd3;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 10px 8px;
+  font-family: -apple-system, sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .5px;
+  box-shadow: -2px 0 12px rgba(0,0,0,.4);
+  transition: all .2s ease;
+}
+
+#eai-toggle-btn:hover {
+  background: #25262b;
+  color: #4dabf7;
+  border-color: #4dabf7;
+}
+
+#eai-toggle-btn.active {
+  background: #4dabf7;
+  color: #fff;
+  border-color: #4dabf7;
+}
+
+#eai-toggle-btn svg {
+  display: block;
+}
+
+#eai-sidebar {
+  position: fixed;
+  top: 0;
+  right: -410px;
+  width: 400px;
+  height: 100vh;
+  border: none;
+  border-left: 1px solid #373a40;
+  z-index: 999997;
+  background: #1a1b1e;
+  box-shadow: -4px 0 24px rgba(0,0,0,.5);
+  transition: right .3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+#eai-sidebar.open {
+  right: 0;
+}

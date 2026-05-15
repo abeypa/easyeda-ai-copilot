@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EasyEDA AI Copilot</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <!-- Marked for markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@9.1.6/marked.min.js"></script>
+  <!-- Highlight.js for code blocks -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/highlight.min.js"></script>
+</head>
+<body>
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-brand">
+      <span class="brand-icon">⚡</span>
+      <span class="brand-name">AI Copilot</span>
+      <span class="brand-badge" id="modelBadge">Loading…</span>
+    </div>
+    <div class="header-actions">
+      <button class="icon-btn" id="refreshSchematicBtn" title="Sync schematic from EasyEDA">↻</button>
+      <button class="icon-btn" id="clearChatBtn" title="Clear conversation">🗑</button>
+    </div>
+  </header>
+
+  <!-- Tab Navigation -->
+  <nav class="tab-nav">
+    <button class="tab-btn active" data-tab="chat">💬 Chat</button>
+    <button class="tab-btn" data-tab="generate">⚡ Generate</button>
+    <button class="tab-btn" data-tab="analyze">🔍 Analyze</button>
+    <button class="tab-btn" data-tab="bom">📋 BOM</button>
+    <button class="tab-btn" data-tab="settings">⚙ Settings</button>
+  </nav>
+
+  <!-- ═══════════ CHAT TAB ═══════════ -->
+  <section class="tab-panel active" id="tab-chat">
+    <div class="chat-messages" id="chatMessages">
+      <div class="welcome-msg">
+        <div class="welcome-icon">⚡</div>
+        <h3>EasyEDA AI Copilot</h3>
+        <p>Ask anything about circuit design, components, PCB layout, or EasyEDA. I can help you design, analyze, and optimize your circuits.</p>
+        <div class="quick-prompts">
+          <button class="quick-btn" data-prompt="What decoupling capacitors should I add to my ESP32 circuit?">ESP32 decoupling caps</button>
+          <button class="quick-btn" data-prompt="Explain the difference between LDO and buck converter for a 5V to 3.3V conversion">LDO vs Buck 5V→3.3V</button>
+          <button class="quick-btn" data-prompt="What are best practices for high-speed PCB routing?">PCB routing tips</button>
+          <button class="quick-btn" data-prompt="How do I protect my circuit from ESD?">ESD protection</button>
+        </div>
+      </div>
+    </div>
+    <div class="chat-input-area">
+      <div class="context-indicator" id="contextIndicator">
+        <span class="ctx-dot" id="ctxDot"></span>
+        <span id="ctxLabel">No schematic loaded</span>
+      </div>
+      <div class="input-row">
+        <textarea
+          id="chatInput"
+          placeholder="Ask about circuits, components, PCB design…"
+          rows="2"
+          maxlength="8000"
+        ></textarea>
+        <button class="send-btn" id="sendBtn" title="Send (Ctrl+Enter)">▶</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════ GENERATE TAB ═══════════ -->
+  <section class="tab-panel" id="tab-generate">
+    <div class="panel-scroll">
+      <div class="section-header">
+        <h3>Circuit Generator</h3>
+        <p>Describe your circuit and AI will generate a component list, netlist, and schematic guidance.</p>
+      </div>
+
+      <div class="form-group">
+        <label>Circuit Description</label>
+        <textarea id="genDescription" rows="4"
+          placeholder="e.g. Design a 12V to 5V buck converter at 2A with efficiency >90%, input range 8-18V, using synchronous switching. Include soft-start and OCP."></textarea>
+      </div>
+
+      <div class="form-row">
+        <div class="form-group half">
+          <label>Supply Voltage</label>
+          <select id="genVoltage">
+            <option value="3.3V">3.3V</option>
+            <option value="5V" selected>5V</option>
+            <option value="12V">12V</option>
+            <option value="24V">24V</option>
+            <option value="custom">Custom…</option>
+          </select>
+        </div>
+        <div class="form-group half">
+          <label>PCB Standard</label>
+          <select id="genPCBStd">
+            <option value="jlcpcb">JLCPCB (LCSC)</option>
+            <option value="generic">Generic / Any</option>
+            <option value="ospark">OSHPark</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Special Requirements</label>
+        <input type="text" id="genRequirements" placeholder="e.g. SMD only, max 50x50mm, automotive grade…" />
+      </div>
+
+      <button class="primary-btn full-width" id="generateBtn">⚡ Generate Circuit</button>
+
+      <div class="result-box" id="genResult" style="display:none">
+        <div class="result-header">
+          <span>Generated Circuit</span>
+          <div class="result-actions">
+            <button class="sm-btn" id="copyGenResult">Copy</button>
+            <button class="sm-btn primary" id="applyToEasyEDA">Apply to EasyEDA</button>
+          </div>
+        </div>
+        <div class="result-content" id="genResultContent"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════ ANALYZE TAB ═══════════ -->
+  <section class="tab-panel" id="tab-analyze">
+    <div class="panel-scroll">
+      <div class="section-header">
+        <h3>Schematic Analyzer</h3>
+        <p>AI reviews your current EasyEDA schematic for design issues, best practices, and improvements.</p>
+      </div>
+
+      <div class="schematic-preview" id="schematicPreview">
+        <div class="preview-empty">
+          <span>📐</span>
+          <p>No schematic loaded</p>
+          <button class="sm-btn" id="loadSchematicBtn">Load from EasyEDA</button>
+        </div>
+      </div>
+
+      <div class="analysis-options">
+        <label class="checkbox-label">
+          <input type="checkbox" id="checkDRC" checked /> Design Rule Checks
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="checkBestPractices" checked /> Best Practices
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="checkComponents" checked /> Component Selection
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="checkPower" checked /> Power & Safety
+        </label>
+      </div>
+
+      <button class="primary-btn full-width" id="analyzeBtn">🔍 Analyze Schematic</button>
+
+      <div class="result-box" id="analyzeResult" style="display:none">
+        <div class="result-header">
+          <span>Analysis Report</span>
+          <button class="sm-btn" id="copyAnalyzeResult">Copy Report</button>
+        </div>
+        <div class="result-content" id="analyzeResultContent"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════ BOM TAB ═══════════ -->
+  <section class="tab-panel" id="tab-bom">
+    <div class="panel-scroll">
+      <div class="section-header">
+        <h3>BOM Generator</h3>
+        <p>Generate a professional Bill of Materials with LCSC part numbers for JLCPCB assembly.</p>
+      </div>
+
+      <div class="form-group">
+        <label>BOM Format</label>
+        <select id="bomFormat">
+          <option value="jlcpcb">JLCPCB Assembly BOM</option>
+          <option value="csv">Generic CSV</option>
+          <option value="markdown">Markdown Table</option>
+          <option value="mouser">Mouser/DigiKey</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>Extra Requirements</label>
+        <input type="text" id="bomExtra" placeholder="e.g. prefer basic parts, AEC-Q100 rated, in-stock only…" />
+      </div>
+
+      <div class="form-row">
+        <button class="primary-btn half" id="bomFromSchematicBtn">📐 From Schematic</button>
+        <button class="secondary-btn half" id="bomManualBtn">✏️ Manual Entry</button>
+      </div>
+
+      <div class="bom-manual-input" id="bomManualInput" style="display:none">
+        <label>Describe your components:</label>
+        <textarea id="bomManualText" rows="5"
+          placeholder="e.g.&#10;- 10x 100nF decoupling caps&#10;- 2x ESP32-WROOM-32&#10;- 5x 10k resistors 0402&#10;- 1x AMS1117-3.3 LDO"></textarea>
+      </div>
+
+      <button class="primary-btn full-width mt8" id="generateBOMBtn">📋 Generate BOM</button>
+
+      <div class="result-box" id="bomResult" style="display:none">
+        <div class="result-header">
+          <span>Bill of Materials</span>
+          <div class="result-actions">
+            <button class="sm-btn" id="copyBOMResult">Copy</button>
+            <button class="sm-btn" id="downloadBOMResult">⬇ Download</button>
+          </div>
+        </div>
+        <div class="result-content" id="bomResultContent"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════ SETTINGS TAB ═══════════ -->
+  <section class="tab-panel" id="tab-settings">
+    <div class="panel-scroll">
+      <div class="section-header">
+        <h3>Settings</h3>
+      </div>
+
+      <div class="settings-group">
+        <h4>OpenRouter API</h4>
+
+        <div class="form-group">
+          <label>API Key <a href="https://openrouter.ai/keys" target="_blank" class="link">(Get key ↗)</a></label>
+          <div class="input-with-action">
+            <input type="password" id="apiKeyInput" placeholder="sk-or-v1-…" autocomplete="off" />
+            <button class="sm-btn" id="toggleApiKey">Show</button>
+          </div>
+          <span class="field-hint">Your key is stored locally and never sent anywhere except OpenRouter.</span>
+        </div>
+
+        <div class="form-group">
+          <label>Model</label>
+          <select id="modelSelect">
+            <optgroup label="Anthropic">
+              <option value="anthropic/claude-sonnet-4-5">Claude Sonnet 4.5 (Recommended)</option>
+              <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet</option>
+              <option value="anthropic/claude-3-haiku">Claude 3 Haiku (Fast)</option>
+              <option value="anthropic/claude-opus-4">Claude Opus 4 (Best)</option>
+            </optgroup>
+            <optgroup label="OpenAI">
+              <option value="openai/gpt-4o">GPT-4o</option>
+              <option value="openai/gpt-4o-mini">GPT-4o Mini (Fast)</option>
+              <option value="openai/o1">o1 (Reasoning)</option>
+            </optgroup>
+            <optgroup label="Google">
+              <option value="google/gemini-pro-1.5">Gemini Pro 1.5</option>
+              <option value="google/gemini-flash-1.5">Gemini Flash 1.5 (Fast)</option>
+              <option value="google/gemini-2.0-flash-001">Gemini 2.0 Flash</option>
+            </optgroup>
+            <optgroup label="Meta / Open Source">
+              <option value="meta-llama/llama-3.3-70b-instruct">Llama 3.3 70B</option>
+              <option value="meta-llama/llama-3.1-8b-instruct">Llama 3.1 8B (Free)</option>
+              <option value="deepseek/deepseek-r1">DeepSeek R1 (Reasoning)</option>
+              <option value="deepseek/deepseek-chat">DeepSeek V3</option>
+            </optgroup>
+            <optgroup label="Mistral">
+              <option value="mistralai/mistral-large">Mistral Large</option>
+              <option value="mistralai/mistral-small">Mistral Small (Fast)</option>
+            </optgroup>
+          </select>
+        </div>
+
+        <button class="sm-btn" id="loadModelsBtn">↻ Load my available models</button>
+      </div>
+
+      <div class="settings-group">
+        <h4>Generation</h4>
+
+        <div class="form-group">
+          <label>Temperature <span id="tempValue">0.7</span></label>
+          <input type="range" id="tempSlider" min="0" max="1" step="0.05" value="0.7" />
+          <div class="range-labels"><span>Precise</span><span>Creative</span></div>
+        </div>
+
+        <div class="form-group">
+          <label>Max Tokens</label>
+          <select id="maxTokensSelect">
+            <option value="2048">2048 (Fast)</option>
+            <option value="4096" selected>4096 (Default)</option>
+            <option value="8192">8192 (Long responses)</option>
+            <option value="16384">16384 (Max)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <h4>Preferences</h4>
+        <label class="checkbox-label">
+          <input type="checkbox" id="includeSchematicCtx" checked />
+          Auto-include schematic in context
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="streamResponses" checked />
+          Stream responses (real-time)
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="lcscPreference" checked />
+          Prefer LCSC parts (JLCPCB)
+        </label>
+      </div>
+
+      <button class="primary-btn full-width" id="saveSettingsBtn">Save Settings</button>
+
+      <div class="settings-footer">
+        <span>EasyEDA AI Copilot v1.0.0</span>
+        <a href="https://github.com/abeypa/easyeda-ai-copilot" target="_blank" class="link">GitHub ↗</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Status Toast -->
+  <div class="toast" id="toast"></div>
+
+  <!-- Loading overlay for streaming indicator -->
+  <div class="streaming-indicator" id="streamingIndicator" style="display:none">
+    <span class="dot-pulse"></span> Generating…
+  </div>
+
+  <!-- Scripts -->
+  <script src="js/prompts.js"></script>
+  <script src="js/openrouter.js"></script>
+  <script src="js/easyeda.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/generator.js"></script>
+  <script src="js/analyzer.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

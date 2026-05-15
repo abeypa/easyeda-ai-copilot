@@ -1,0 +1,98 @@
+{
+	"name": "easyeda-ai-copilot",
+	"uuid": "a1b2c3d4e5f641dcadfa57ef58b7ed99",
+	"displayName": "EasyEDA AI Copilot",
+	"description": "AI-powered copilot for EasyEDA Pro — generate schematics from natural language, assemble circuits block-by-block, inspect LCSC stock, place PCB components, and get interactive circuit design help. Connects to your local backend server on port 5120.",
+	"version": "2.1.0",
+	"publisher": "ai-copilot",
+	"engines": {
+		"eda": "^2.3.0"
+	},
+	"license": "Apache-2.0",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/biosshot/easyeda-copilot"
+	},
+	"categories": [
+		"Other",
+		"AI",
+		"Tools"
+	],
+	"keywords": [
+		"AI",
+		"EDA",
+		"EasyEDA",
+		"circuit",
+		"LCSC",
+		"copilot",
+		"PCB"
+	],
+	"images": {
+		"logo": "./images/logo.png"
+	},
+	"homepage": "https://github.com/biosshot/easyeda-copilot",
+	"bugs": "https://github.com/biosshot/easyeda-copilot/issues",
+	"entry": "./dist/index",
+	"dependentExtensions": [],
+	"headerMenus": {
+		"home": [],
+		"sch": [
+			{
+				"id": "Copilot",
+				"title": "AI Copilot",
+				"menuItems": [
+					{
+						"id": "Interface",
+						"title": "Open Copilot",
+						"registerFn": "openInterface"
+					},
+					{
+						"id": "Export",
+						"title": "Export",
+						"menuItems": [
+							{
+								"id": "ExportBomGOST",
+								"title": "Elements List GOST",
+								"registerFn": "exportBomGOST"
+							}
+						]
+					},
+					{
+						"id": "Import",
+						"title": "Import",
+						"menuItems": [
+							{
+								"id": "ImportCircuit",
+								"title": "Import circuit",
+								"registerFn": "importCircuit"
+							}
+						]
+					},
+					{
+						"id": "About",
+						"title": "About...",
+						"registerFn": "about"
+					}
+				]
+			}
+		],
+		"pcb": [
+			{
+				"id": "Copilot",
+				"title": "AI Copilot",
+				"menuItems": [
+					{
+						"id": "Interface",
+						"title": "Open Copilot (PCB)",
+						"registerFn": "openInterface"
+					},
+					{
+						"id": "About",
+						"title": "About...",
+						"registerFn": "about"
+					}
+				]
+			}
+		]
+	}
+}

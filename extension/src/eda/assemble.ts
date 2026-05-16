@@ -374,11 +374,71 @@ async function drawEdges(edges: CircuitAssembly['edges'], components: CircuitAss
             try {
                 const wire = await eda.sch_PrimitiveWire.create(values, netName);
             } catch (err) {
-                recordToast(`Wire error: ${(err as Error).message} ${JSON.stringify(values)} ${netName} ${section.incomingShape} -> ${section.outgoingShape}`, 'error');
+                // v2.3.8: wire.create() can fail when the routed path crosses
+                // an unrelated component's body (common for long cross-block
+                // global nets like GND that span 3+ blocks). For global power
+                // nets we can recover by stamping a net-flag symbol on each
+                // endpoint pin — connectivity is preserved through the
+                // shared net identifier without needing a drawn wire.
+                const fallbackOk = await tryGlobalNetFlagFallback(
+                    netName, srcPinPos, trgPinPos
+                );
+                if (fallbackOk) {
+                    recordToast(
+                        `Wire ${netName} (${section.incomingShape} -> ${section.outgoingShape}) crossed a component; using net-flag fallback instead.`,
+                        'warning'
+                    );
+                } else {
+                    recordToast(`Wire error: ${(err as Error).message} ${JSON.stringify(values)} ${netName} ${section.incomingShape} -> ${section.outgoingShape}`, 'error');
+                }
             }
         }
     }
 
+}
+
+/**
+ * v2.3.8 — Fallback for failed long-distance wire creates on global nets.
+ * Returns true if both endpoints were successfully stamped with a net flag
+ * (Ground for GND, Power for everything else recognised as a global net).
+ * Pin positions are in EasyEDA stored coords (negative Y); createNetFlag
+ * takes the same input convention as sch_PrimitiveComponent.create (the
+ * y param is internally flipped), so we pass −pinY to place the flag at
+ * the pin's visual position.
+ */
+async function tryGlobalNetFlagFallback(
+    netName: string,
+    src: { x: number, y: number },
+    trg: { x: number, y: number }
+): Promise<boolean> {
+    if (!netName) return false;
+    const upper = netName.toUpperCase();
+    const isGround = upper === 'GND' || upper === 'AGND' || upper === 'DGND' || upper === 'PGND';
+    const isPower =
+        upper === 'VCC' || upper === 'VDD' || upper === 'VEE' || upper === 'VSS' ||
+        /^[+-]?\d/.test(upper) || // +3V3, +5V, 12V, -12V, etc.
+        upper.startsWith('V') || upper.startsWith('+') || upper.startsWith('-');
+    if (!isGround && !isPower) return false;
+
+    const identification: 'Ground' | 'Power' = isGround ? 'Ground' : 'Power';
+
+    const place = async (p: { x: number, y: number }) => {
+        try {
+            // createNetFlag y convention matches sch_PrimitiveComponent.create
+            // (positive input → stored as negative). pinY is already negative,
+            // so we negate to recover the positive input value.
+            const flag = await eda.sch_PrimitiveComponent.createNetFlag(
+                identification, netName, to2(p.x), to2(-p.y)
+            );
+            return !!flag;
+        } catch {
+            return false;
+        }
+    };
+
+    const a = await place(src);
+    const b = await place(trg);
+    return a && b;
 }
 
 const getPageSize = async () => {

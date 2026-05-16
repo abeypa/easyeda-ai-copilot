@@ -488,7 +488,13 @@ async function placeNet(nets: AddedNet[], placeComponents: PlacedComponents, mak
 
         if (wireCreated && makePortForThis && endX && endYPort && dir) {
             const rotation = dir.dy === 1 ? 180 : 0;
-            const comp = await placeComponent(NET_PORT_COMPONENT, { x: endX, y: -endYPort, rotate: rotation }).catch(e => undefined);
+            // FIX v2.3.5: removed `-endYPort` negation. EasyEDA Pro's
+            // sch_PrimitiveComponent.create() and pin.getState_Y() both use
+            // Y positive-down (screen convention). The historical negation
+            // was a "two wrongs cancel" leftover that, with the v2.3.3
+            // pointToArr fix, now places NET_PORT symbols far below the
+            // canvas — producing extremely long dangling vertical wires.
+            const comp = await placeComponent(NET_PORT_COMPONENT, { x: endX, y: endYPort, rotate: rotation }).catch(e => undefined);
 
             if (comp) {
                 comp.setState_Name(net.net);
@@ -684,10 +690,15 @@ export async function assembleCircuit(circuit: CircuitAssembly) {
     await drawRect(circuit.blocks_rect, offset);
 
     const isUsedPin = (d: string, p: number | string) => {
-        const l = `${d}_pin_${p}`;
-        if (circuit.edges.some(e => e.sections.some(s => s.incomingShape === l || s.outgoingShape === l))) {
-            return true
-        }
+        // Hardened v2.3.5: null-safe sections + explicit string coercion so
+        // that pin_number 1 (number) and "1" (string) both compare equal.
+        const l = `${String(d)}_pin_${String(p)}`;
+        return (circuit.edges ?? []).some(e =>
+            (e?.sections ?? []).some(s =>
+                String(s?.incomingShape ?? '') === l ||
+                String(s?.outgoingShape ?? '') === l
+            )
+        );
     }
 
     // Build a set of pins already covered by circuit.added_net so we don't

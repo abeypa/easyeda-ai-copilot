@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -161,6 +162,12 @@ app.add_middleware(
 # Intent detection helpers
 # ---------------------------------------------------------------------------
 
+# Matches LCSC C-numbers like C2898701, C404270 (5-8 digits after C)
+LCSC_NUMBER_RE = re.compile(r'\bC\d{5,8}\b')
+
+# Matches schematic designators: J1, D1, R12, U3, Q2, SW1, LED1, etc.
+DESIGNATOR_RE = re.compile(r'\b([A-Z]{1,3}\d+)\b')
+
 CIRCUIT_KEYWORDS = [
     "draw", "design", "create", "build", "make", "generate", "circuit", "schematic",
     "diagram", "wiring", "solder", "connect", "assemble", "breadboard", "pcb",
@@ -168,12 +175,16 @@ CIRCUIT_KEYWORDS = [
 ]
 
 COMPONENT_SEARCH_KEYWORDS = [
-    "find", "search", "look", "show", "list", "find component", "lcsc",
+    "find", "search", "look", "show", "list", "find component",
     "part number", "stock", "available",
 ]
 
-PCB_KEYWORDS = [
-    "place", "pcb", "layout", "position", "arrange", "board",
+# Only trigger PCB placement on unambiguous PCB-layout phrases.
+# Simple "place" is NOT enough — "place the following components" is circuit intent.
+PCB_EXPLICIT_PHRASES = [
+    "pcb layout", "pcb placement", "place on pcb", "position on pcb",
+    "arrange on pcb", "route pcb", "pcb routing", "board layout",
+    "component placement on the board", "place components on the board",
 ]
 
 EXPLAIN_KEYWORDS = [
@@ -182,13 +193,115 @@ EXPLAIN_KEYWORDS = [
 ]
 
 
+def is_structured_component_list(content: str) -> bool:
+    """
+    Return True when the message contains a structured component list with at least
+    two explicit LCSC C-numbers and two schematic designators.
+
+    Recognises formats such as:
+      | J1 | DB142V-5.08-4P-GN | 4-pin connector | 4 | C2898701 |
+      J1 DB142V-5.08-4P-GN C2898701
+    """
+    lcsc_numbers = LCSC_NUMBER_RE.findall(content)
+    if len(lcsc_numbers) < 2:
+        return False
+    designators = DESIGNATOR_RE.findall(content)
+    if len(designators) < 2:
+        return False
+    return True
+
+
+def parse_structured_components(content: str) -> List["BaseComponent"]:
+    """
+    Parse a structured component table from the user message.
+
+    Recognises the markdown-table format:
+        | DESIG | VALUE | DESCRIPTION | PIN_COUNT | LCSC_NUMBER |
+
+    The LCSC C-number is stored as `search_query` so the frontend's
+    resolveComponentUuids can match by supplierId.
+    """
+    from models.circuit import BaseComponent, Pin  # local import — avoids circular at module level
+
+    components: List[BaseComponent] = []
+    seen: set = set()
+
+    # --- Strategy 1: strict markdown table row ---
+    table_re = re.compile(
+        r'\|\s*([A-Z]{1,3}\d+)\s*\|\s*([^\|]+?)\s*\|\s*([^\|]*?)\s*\|'
+        r'(?:\s*(\d+)\s*\|)?\s*(C\d{5,8})\s*\|',
+        re.IGNORECASE,
+    )
+    for m in table_re.finditer(content):
+        designator = m.group(1).strip().upper()
+        value      = m.group(2).strip()
+        pin_count  = int(m.group(4)) if m.group(4) else 2
+        lcsc       = m.group(5).strip()
+
+        if designator in seen:
+            continue
+        seen.add(designator)
+
+        pins = [
+            Pin(pin_number=i + 1, name=f"PIN{i + 1}", signal_name="NC")
+            for i in range(max(pin_count, 2))
+        ]
+        components.append(BaseComponent(
+            designator=designator,
+            value=value,
+            block_name="UserDefined",
+            search_query=lcsc,
+            part_uuid=None,
+            pins=pins,
+        ))
+
+    # --- Strategy 2: loose line scan (non-table formats) ---
+    if not components:
+        line_re = re.compile(
+            r'([A-Z]{1,3}\d+)\s+'
+            r'([A-Za-z0-9_\-\.]+)'
+            r'.{0,80}'
+            r'(C\d{5,8})',
+            re.IGNORECASE,
+        )
+        for m in line_re.finditer(content):
+            designator = m.group(1).strip().upper()
+            value      = m.group(2).strip()
+            lcsc       = m.group(3).strip()
+
+            if designator in seen:
+                continue
+            seen.add(designator)
+
+            components.append(BaseComponent(
+                designator=designator,
+                value=value,
+                block_name="UserDefined",
+                search_query=lcsc,
+                part_uuid=None,
+                pins=[
+                    Pin(pin_number=1, name="PIN1", signal_name="NC"),
+                    Pin(pin_number=2, name="PIN2", signal_name="NC"),
+                ],
+            ))
+
+    return components
+
+
 def detect_intent(messages: List[ChatMessage]) -> str:
     """
     Detect user intent from the last human message.
-    Returns: "circuit", "component_search", "pcb_placement", "explain", "chat"
 
-    Priority: explain > component_search > pcb_placement > circuit > chat
-    (explain/search should not accidentally trigger circuit generation)
+    Returns one of:
+        "structured_circuit" \u2014 explicit component list with LCSC C-numbers
+        "circuit"            \u2014 natural-language circuit design request
+        "component_search"   \u2014 search/find component queries
+        "pcb_placement"      \u2014 PCB layout / placement request
+        "explain"            \u2014 explanation / analysis request
+        "chat"               \u2014 general chat fallback
+
+    Priority (highest first):
+        structured_circuit > explain > component_search > pcb_placement > circuit > chat
     """
     last_human = None
     for msg in reversed(messages):
@@ -199,37 +312,44 @@ def detect_intent(messages: List[ChatMessage]) -> str:
     if not last_human:
         return "chat"
 
-    content = last_human.content.lower()
+    content       = last_human.content          # keep original case for C-number detection
+    content_lower = content.lower()
 
-    # Explanation intent has HIGHEST priority ("what is this circuit", "explain", "analyze")
-    if any(kw in content for kw in EXPLAIN_KEYWORDS):
+    # \u2500\u2500 Structured component list (LCSC C-numbers present) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # Must be first: "Place the following components \u2026 C2898701" must NOT fall
+    # through to pcb_placement via the word "place".
+    if is_structured_component_list(content):
+        return "structured_circuit"
+
+    # \u2500\u2500 Explanation / analysis \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    if any(kw in content_lower for kw in EXPLAIN_KEYWORDS):
         return "explain"
 
-    # Component search
-    if any(kw in content for kw in COMPONENT_SEARCH_KEYWORDS):
+    # \u2500\u2500 Component search \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    if any(kw in content_lower for kw in COMPONENT_SEARCH_KEYWORDS):
         return "component_search"
 
-    # PCB placement
-    if any(kw in content for kw in PCB_KEYWORDS) and any(w in content for w in ["place", "position", "layout", "arrange"]):
+    # \u2500\u2500 PCB layout (strict phrases only) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    if any(p in content_lower for p in PCB_EXPLICIT_PHRASES):
         return "pcb_placement"
 
-    # Circuit generation: requires action verb + circuit noun together
-    action_verbs = ["draw", "design", "create", "build", "make", "generate", "assemble",
-                    "\u043d\u0430\u0440\u0438\u0441\u0443\u0439", "\u0441\u043e\u0437\u0434\u0430\u0439",
-                    "\u0440\u0430\u0437\u0440\u0430\u0431\u043e\u0442\u0430\u0439", "\u0441\u043f\u0440\u043e\u0435\u043a\u0442\u0438\u0440\u0443\u0439"]
+    # \u2500\u2500 Circuit generation: action verb + circuit noun \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    action_verbs = [
+        "draw", "design", "create", "build", "make", "generate", "assemble",
+        "\u043d\u0430\u0440\u0438\u0441\u0443\u0439", "\u0441\u043e\u0437\u0434\u0430\u0439", "\u0440\u0430\u0437\u0440\u0430\u0431\u043e\u0442\u0430\u0439", "\u0441\u043f\u0440\u043e\u0435\u043a\u0442\u0438\u0440\u0443\u0439",
+    ]
     circuit_nouns = ["circuit", "schematic", "diagram", "wiring", "\u0441\u0445\u0435\u043c"]
-    has_action = any(v in content for v in action_verbs)
-    has_noun = any(n in content for n in circuit_nouns)
+    has_action = any(v in content_lower for v in action_verbs)
+    has_noun   = any(n in content_lower for n in circuit_nouns)
     if has_action and has_noun:
         return "circuit"
 
-    # Explicit circuit draw phrases
     explicit_phrases = [
         "draw circuit", "design circuit", "create circuit", "make circuit",
         "build circuit", "generate circuit", "design schematic", "create schematic",
         "new circuit", "whole circuit",
     ]
-    if any(p in content for p in explicit_phrases):
+    if any(p in content_lower for p in explicit_phrases):
         return "circuit"
 
     return "chat"
@@ -534,6 +654,176 @@ async def run_circuit_pipeline(
     state.done = True
 
 
+async def run_structured_circuit_pipeline(
+    state: StreamState,
+    messages: List[ChatMessage],
+    llm_settings: LLMSettings,
+) -> None:
+    """
+    Shortcut pipeline for messages that already contain an explicit component list
+    with LCSC C-numbers.
+
+    Skips the Architect and Component Selector agents — instead it:
+      1. Parses components directly from the user message
+      2. Creates a minimal synthetic block diagram
+      3. Runs the Circuit Designer to assign signal / pin connections
+      4. Runs ELK layout
+      5. Streams the circuit_agent_result
+
+    The LCSC C-number is stored as `search_query` on each component so the
+    frontend's resolveComponentUuids() can look up the part by supplierId.
+    """
+    from models.circuit import Block, CircuitBlocks, CircuitMetadata, CircuitStruct
+
+    errors: List[CircuitError] = []
+
+    try:
+        provider = get_provider(llm_settings)
+    except ValueError as e:
+        state.put_event("error", json.dumps({"error": str(e)}))
+        state.done = True
+        return
+
+    user_message = extract_user_message(messages)
+
+    # ── Parse components from the user message ────────────────────────────────
+    components = parse_structured_components(user_message)
+
+    if not components:
+        # Fallback: run the normal circuit pipeline
+        await run_circuit_pipeline(state, messages, llm_settings)
+        return
+
+    todos = [
+        {"status": "completed",   "content": "Parsing component list"},
+        {"status": "in_progress", "content": "Designing pin connections"},
+        {"status": "pending",     "content": "Resolving LCSC part UUIDs (client-side)"},
+        {"status": "pending",     "content": "Computing layout"},
+    ]
+
+    def update_todo(idx: int, status: str):
+        todos[idx]["status"] = status
+        state.put_event("update-todos", make_todo_event(todos))
+
+    state.put_event("update-todos", make_todo_event(todos))
+    state.put_event(
+        "mes_chunk",
+        f"Found **{len(components)} components** with explicit LCSC part numbers. "
+        f"Skipping component selection — designing connections directly...\n\n",
+    )
+
+    # ── Build a minimal synthetic block diagram ───────────────────────────────
+    blocks = CircuitBlocks(
+        metadata=CircuitMetadata(
+            project_name="UserDefined Circuit",
+            description=f"Circuit assembled from {len(components)} user-specified components",
+        ),
+        blocks=[
+            Block(
+                name="UserDefined",
+                description="Components specified by the user",
+                next_block_names=[],
+            )
+        ],
+    )
+
+    # ── Circuit Designer — assign signal names / pin connections ──────────────
+    if state.stopped:
+        return
+
+    update_todo(1, "in_progress")
+    state.put_event("status", "Designing pin connections...")
+    state.put_event("mes_chunk", "Designing signal connections between components...\n")
+
+    try:
+        designer_model = llm_settings.get_model_for_agent("circuit-maker")
+        circuit, design_errors = await run_circuit_designer(
+            blocks=blocks,
+            components=components,
+            provider=provider,
+            model=designer_model,
+        )
+        errors.extend(design_errors)
+        warn_count = sum(1 for e in design_errors if e.severity == "warning")
+        state.put_event(
+            "mes_chunk",
+            f"**Connections designed** ({len(circuit.components)} components"
+            + (f", {warn_count} warnings" if warn_count else "")
+            + ")\n\n",
+        )
+        update_todo(1, "completed")
+    except Exception as e:
+        logger.error(f"Circuit designer failed (structured pipeline): {e}")
+        errors.append(CircuitError(component="*", error=f"Circuit design failed: {e}", severity="error"))
+        state.put_event("mes_chunk", f"\n**Error in circuit design**: {e}\n")
+        todos[1]["status"] = "error"
+        state.put_event("update-todos", make_todo_event(todos))
+        circuit = CircuitStruct(
+            metadata=blocks.metadata,
+            blocks=blocks.blocks,
+            components=components,
+        )
+
+    # Note: LCSC UUID resolution happens client-side via resolveComponentUuids()
+    update_todo(2, "completed")
+    state.put_event("mes_chunk", "LCSC UUIDs will be resolved in EasyEDA (by C-number).\n\n")
+
+    # ── ELK Layout ────────────────────────────────────────────────────────────
+    if state.stopped:
+        return
+
+    update_todo(3, "in_progress")
+    state.put_event("status", "Computing schematic layout...")
+    state.put_event("mes_chunk", "Computing schematic layout...\n\n")
+
+    try:
+        assembly = layout_circuit(circuit)
+        update_todo(3, "completed")
+        state.put_event(
+            "mes_chunk",
+            f"**Layout complete** — {len(assembly.components)} components placed, "
+            f"{len(assembly.edges)} connections routed\n\n",
+        )
+    except Exception as e:
+        logger.error(f"Layout failed (structured pipeline): {e}")
+        errors.append(CircuitError(component="*", error=f"Layout failed: {e}", severity="error"))
+        todos[3]["status"] = "error"
+        state.put_event("update-todos", make_todo_event(todos))
+        state.put_event("mes_chunk", f"\n**Layout error**: {e}\n")
+        state.put_event("end", "")
+        state.done = True
+        return
+
+    # ── Emit result ───────────────────────────────────────────────────────────
+    if state.stopped:
+        return
+
+    block_diagram_data = {
+        "metadata": blocks.metadata.model_dump(),
+        "blocks": [b.model_dump() for b in blocks.blocks],
+    }
+    result_message = make_circuit_result_message(
+        circuit=assembly,
+        errors=errors,
+        block_diagram=block_diagram_data,
+    )
+    state.put_event("message", make_message_event(result_message))
+
+    warn_count  = sum(1 for e in errors if e.severity == "warning")
+    error_count = sum(1 for e in errors if e.severity == "error")
+
+    summary = f"\n---\n**Circuit ready!** ({len(assembly.components)} components, {len(assembly.edges)} connections)"
+    if warn_count:
+        summary += f"\n- {warn_count} warnings"
+    if error_count:
+        summary += f"\n- {error_count} errors"
+    summary += "\n\nClick **Place Circuit** to insert into EasyEDA. Components will be resolved from LCSC by part number.\n"
+
+    state.put_event("mes_chunk", summary)
+    state.put_event("end", "")
+    state.done = True
+
+
 async def run_chat_pipeline(
     state: StreamState,
     messages: List[ChatMessage],
@@ -672,12 +962,14 @@ async def run_stream_pipeline(state: StreamState) -> None:
         intent = detect_intent(messages)
         logger.info(f"Stream {state.stream_id}: detected intent '{intent}'")
 
-        if intent == "circuit":
+        if intent == "structured_circuit":
+            await run_structured_circuit_pipeline(state, messages, llm_settings)
+        elif intent == "circuit":
             await run_circuit_pipeline(state, messages, llm_settings)
         elif intent == "explain":
             await run_explain_pipeline(state, messages, llm_settings)
         else:
-            # Default: general chat
+            # Default: general chat (covers "chat", "component_search", "pcb_placement")
             await run_chat_pipeline(state, messages, llm_settings)
 
     except Exception as e:

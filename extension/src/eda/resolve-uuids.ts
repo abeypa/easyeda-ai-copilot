@@ -18,6 +18,14 @@
 
 import type { CircuitAssembly } from "../types/circuit";
 
+/** Matches LCSC supplier IDs like C2898701, C404270 (C + 5-8 digits). */
+const LCSC_RE = /\bC\d{5,8}\b/g;
+
+/** Extract all LCSC C-numbers found in a string. */
+function extractLcscNumbers(s: string): string[] {
+    return [...(s.matchAll(LCSC_RE))].map(m => m[0]);
+}
+
 export async function resolveComponentUuids(
     components: CircuitAssembly['components'],
 ): Promise<void> {
@@ -39,37 +47,62 @@ export async function resolveComponentUuids(
         const searchQuery = (comp as any).search_query || '';
         const value = comp.value || '';
 
-        // Try multiple search strategies, from most specific to least
+        // Build search query list from most-specific to least-specific.
         const queries: string[] = [];
 
-        // Strategy 1: Just the part number/value (e.g., "STM32G431CBU6", "LM2596S-ADJ", "AMS1117-3.3")
-        if (value) queries.push(value);
+        // Strategy 0 (highest priority): LCSC C-numbers extracted from search_query or value.
+        // These match directly on supplierId so they are the most reliable lookup.
+        const lcscNumbers = [
+            ...extractLcscNumbers(searchQuery),
+            ...extractLcscNumbers(value),
+        ];
+        // De-duplicate while preserving order
+        for (const lcsc of lcscNumbers) {
+            if (!queries.includes(lcsc)) queries.push(lcsc);
+        }
 
-        // Strategy 2: First word of search_query (often the actual part number)
+        // Strategy 1: Component value (e.g., "STM32G431CBU6", "AMS1117-3.3")
+        if (value && !queries.includes(value)) queries.push(value);
+
+        // Strategy 2: First word of search_query (often the bare part number)
         if (searchQuery && searchQuery !== value) {
             const partName = searchQuery.split(' ')[0];
-            if (partName && partName !== value) queries.push(partName);
-            queries.push(searchQuery);
+            if (partName && !queries.includes(partName)) queries.push(partName);
+            // Strategy 3: Full search_query
+            if (!queries.includes(searchQuery)) queries.push(searchQuery);
         }
 
         let found = false;
         for (const query of queries) {
             if (!query) continue;
+
+            // For LCSC C-number queries we want an exact supplierId match.
+            const isLcscQuery = /^C\d{5,8}$/.test(query);
+
             try {
                 const devices = await eda.lib_Device.search(query);
                 if (devices && devices.length > 0) {
-                    // Find best match — prefer LCSC library components
-                    const match = devices.find((d: any) =>
-                        d.supplierId === query ||
-                        d.manufacturerId === query ||
-                        d.name === query
-                    ) || devices.find((d: any) =>
-                        d.name?.toLowerCase().includes(value.toLowerCase())
-                    ) || devices[0];
+                    // Prefer exact supplier/manufacturer/name match, then name substring,
+                    // finally the first result.
+                    const match =
+                        devices.find((d: any) =>
+                            d.supplierId === query ||
+                            d.manufacturerId === query ||
+                            d.name === query
+                        ) ||
+                        // When the query is NOT an LCSC number, allow a name-substring match.
+                        (!isLcscQuery
+                            ? devices.find((d: any) =>
+                                  d.name?.toLowerCase().includes(value.toLowerCase())
+                              )
+                            : undefined) ||
+                        // For LCSC queries only use devices[0] if supplierId matches.
+                        (isLcscQuery
+                            ? devices.find((d: any) => d.supplierId === query)
+                            : devices[0]);
 
                     if (match?.uuid) {
                         (comp as any).part_uuid = match.uuid;
-                        // Store libraryUuid so createComponet can use the correct library
                         (comp as any)._libraryUuid = match.libraryUuid || 'lcsc';
                         resolvedCount++;
                         found = true;
@@ -84,7 +117,10 @@ export async function resolveComponentUuids(
         if (!found) {
             failedCount++;
             failedDesignators.push(comp.designator);
-            console.warn(`[AI Copilot] Could not resolve UUID for ${comp.designator} (${value}). Tried: ${queries.join(', ')}`);
+            console.warn(
+                `[AI Copilot] Could not resolve UUID for ${comp.designator} (${value}). ` +
+                `Tried: ${queries.join(', ')}`
+            );
         }
     }
 

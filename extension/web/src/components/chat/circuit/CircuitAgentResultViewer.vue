@@ -175,9 +175,15 @@ const components = computed(() =>
     (props.result?.circuit?.components || []).filter((comp: any) => !['GND', 'VCC'].includes(comp.part_uuid))
 );
 
-// Assembly errors from the result
+// v2.3.7: runtime errors captured during the last assembleCircuit() call.
+// Merged with backend-supplied errors so the AssemblyErrors banner shows
+// both stock/UUID notices AND live placement/wire failures from the SDK
+// (which would otherwise vanish with the disappearing toasts).
+const runtimeAssemblyErrors = ref<any[]>([]);
+
 const assemblyErrors = computed(() => {
-    return props.result?.assembly_errors || props.result?.errors || [];
+    const fromResult = props.result?.assembly_errors || props.result?.errors || [];
+    return [...fromResult, ...runtimeAssemblyErrors.value];
 });
 
 const assemblingBlock = ref<string | null>(null);
@@ -277,7 +283,14 @@ async function assembleBlock(blockName: string) {
         // Resolve missing LCSC UUIDs before assembly
         showToastMessage('Resolving component UUIDs...', 'info');
         await resolveComponentUuids(partialCircuit.components);
-        await assembleCircuit(partialCircuit);
+        const runtimeErrors = await assembleCircuit(partialCircuit);
+        if (runtimeErrors?.length) {
+            runtimeAssemblyErrors.value = runtimeErrors.map(e => ({
+                component: e.component,
+                message: e.message,
+                severity: e.severity,
+            }));
+        }
         showToastMessage(`Block "${blockName}" assembled`, 'success');
     } catch (err) {
         showToastMessage(`Failed to assemble block: ${(err as Error).message}`, 'error');
@@ -291,7 +304,18 @@ async function assembleCircuitHandler() {
     showToastMessage('Resolving component UUIDs...', 'info');
     // Resolve missing LCSC UUIDs before assembly
     await resolveComponentUuids(props.result.circuit.components);
-    await assembleCircuit(props.result.circuit);
+    // v2.3.7: capture runtime errors so they persist in the chat panel
+    // (the AssemblyErrors banner) instead of vanishing with the toast.
+    const runtimeErrors = await assembleCircuit(props.result.circuit);
+    if (runtimeErrors?.length) {
+        runtimeAssemblyErrors.value = runtimeErrors.map(e => ({
+            component: e.component,
+            message: e.message,
+            severity: e.severity,
+        }));
+    } else {
+        runtimeAssemblyErrors.value = [];
+    }
 }
 
 onMounted(() => {

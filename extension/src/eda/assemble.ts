@@ -38,6 +38,30 @@ interface AddedNet {
 
 const to2 = (x: number) => { x = Math.round(x); return x - (x % 5); }
 
+// v2.3.7: persistent assembly-error log so the iframe can display every
+// toast in the chat panel after assembly completes (toasts disappear
+// too quickly to read). Reset at the start of each assembleCircuit call,
+// populated by recordToast() which also fires the live toast as before.
+export interface AssemblyRuntimeError {
+    component?: string;
+    message: string;
+    severity: 'info' | 'warning' | 'error';
+}
+let currentErrorLog: AssemblyRuntimeError[] = [];
+
+function recordToast(
+    message: string,
+    severity: 'info' | 'warning' | 'error',
+    component?: string
+) {
+    const tType =
+        severity === 'error' ? ESYS_ToastMessageType.ERROR
+        : severity === 'warning' ? ESYS_ToastMessageType.WARNING
+        : ESYS_ToastMessageType.INFO;
+    eda.sys_Message.showToastMessage(message, tType);
+    currentErrorLog.push({ component, message, severity });
+}
+
 const applyOffset = (x: number, y: number, offset: Offset) => {
 
     if (offset.x) x = offset.x + x;
@@ -186,7 +210,7 @@ async function placeComponents(components: CircuitAssembly['components'], offset
         } catch (err) {
             const eMes = (err instanceof Error) ? err.message : '';
 
-            eda.sys_Message.showToastMessage(`Component error ${designator}: ${eMes}`, ESYS_ToastMessageType.ERROR);
+            recordToast(`Component error ${designator}: ${eMes}`, 'error', designator);
             return undefined;
         }
     });
@@ -196,9 +220,9 @@ async function placeComponents(components: CircuitAssembly['components'], offset
     const succeeded = placedComponents.filter(Boolean).length;
     const total = components.length;
     if (succeeded < total) {
-        eda.sys_Message.showToastMessage(
+        recordToast(
             `Placed ${succeeded}/${total} components. ${total - succeeded} could not be found in LCSC.`,
-            succeeded > 0 ? ESYS_ToastMessageType.INFO : ESYS_ToastMessageType.ERROR
+            succeeded > 0 ? 'warning' : 'error'
         );
     }
 
@@ -306,8 +330,8 @@ async function drawEdges(edges: CircuitAssembly['edges'], components: CircuitAss
             const srcpin = await findPin(sdesignator, { num: spin, name: searchPinName(sdesignator, spin) }, placeComponents);
             const trgpin = await findPin(tdesignator, { num: tpin, name: searchPinName(tdesignator, tpin) }, placeComponents);
 
-            if (!srcpin) eda.sys_Message.showToastMessage(`Wire error not found pin: ${spin} ${sdesignator}`, ESYS_ToastMessageType.WARNING);
-            if (!trgpin) eda.sys_Message.showToastMessage(`Wire error not found pin: ${tpin} ${tdesignator}`, ESYS_ToastMessageType.WARNING);
+            if (!srcpin) recordToast(`Wire error not found pin: ${spin} ${sdesignator}`, 'warning', sdesignator);
+            if (!trgpin) recordToast(`Wire error not found pin: ${tpin} ${tdesignator}`, 'warning', tdesignator);
 
             const srcPinPos = getPinPos(srcpin, section.startPoint);
             const trgPinPos = getPinPos(trgpin, section.endPoint);
@@ -350,7 +374,7 @@ async function drawEdges(edges: CircuitAssembly['edges'], components: CircuitAss
             try {
                 const wire = await eda.sch_PrimitiveWire.create(values, netName);
             } catch (err) {
-                eda.sys_Message.showToastMessage(`Wire error: ${(err as Error).message} ${JSON.stringify(values)} ${netName} ${section.incomingShape} -> ${section.outgoingShape}`, ESYS_ToastMessageType.ERROR);
+                recordToast(`Wire error: ${(err as Error).message} ${JSON.stringify(values)} ${netName} ${section.incomingShape} -> ${section.outgoingShape}`, 'error');
             }
         }
     }
@@ -389,7 +413,7 @@ async function placeNet(nets: AddedNet[], placeComponents: PlacedComponents, mak
 
         const pin = await findPin(net.designator, { num: net.pin_number, name: net.pin_name }, placeComponents);
         if (!pin) {
-            eda.sys_Message.showToastMessage(`Not found pin in placenet: ${net.designator} ${net.pin_number}`, ESYS_ToastMessageType.ERROR);
+            recordToast(`Not found pin in placenet: ${net.designator} ${net.pin_number}`, 'error', net.designator);
             continue;
         }
 
@@ -514,9 +538,10 @@ async function placeNet(nets: AddedNet[], placeComponents: PlacedComponents, mak
         }
 
         if (!wireCreated) {
-            eda.sys_Message.showToastMessage(
+            recordToast(
                 `Wire creation failed after all attempts: "${net.net}" at ${net.designator} ${net.pin_number}`,
-                ESYS_ToastMessageType.ERROR
+                'error',
+                net.designator
             );
         }
     }
@@ -602,7 +627,10 @@ async function getBBox(components: (ISCH_PrimitiveComponent | ISCH_PrimitiveComp
     };
 }
 
-export async function assembleCircuit(circuit: CircuitAssembly) {
+export async function assembleCircuit(circuit: CircuitAssembly): Promise<AssemblyRuntimeError[]> {
+    // v2.3.7: reset the per-run error log; recordToast() will populate it.
+    currentErrorLog = [];
+
     eda.sys_Message.showToastMessage(`Assemble circuit...`, ESYS_ToastMessageType.INFO);
     if (eda.checkpointer) await eda.checkpointer.save(true);
     else eda.sys_Message.showToastMessage(`Checkpointer is null`, ESYS_ToastMessageType.INFO);
@@ -685,7 +713,7 @@ export async function assembleCircuit(circuit: CircuitAssembly) {
     if (circuit.rm_components?.length && await confirmationMessage('The following components will be removed:\n' + circuit.rm_components.join(', '), 'Confirm deletion'))
         for (const designator of circuit.rm_components) {
             await removeComponent(designator).catch(e => {
-                eda.sys_Message.showToastMessage(`Error with rm component ${designator}: ${(e as Error).message}`, ESYS_ToastMessageType.ERROR);
+                recordToast(`Error with rm component ${designator}: ${(e as Error).message}`, 'error', designator);
             });
         }
     // Easyeda - slowly removes the components
@@ -734,5 +762,20 @@ export async function assembleCircuit(circuit: CircuitAssembly) {
     await placeNet(circuit.added_net ?? [], placedComp, true, components);
     await placeNet(netForUnusedPins, placedComp, false, components);
 
-    eda.sys_Message.showToastMessage(`Assemble complete.`, ESYS_ToastMessageType.SUCCESS);
+    const errorCount = currentErrorLog.filter(e => e.severity === 'error').length;
+    const warnCount = currentErrorLog.filter(e => e.severity === 'warning').length;
+    if (errorCount || warnCount) {
+        eda.sys_Message.showToastMessage(
+            `Assemble complete with ${errorCount} error(s), ${warnCount} warning(s). See chat panel for details.`,
+            errorCount ? ESYS_ToastMessageType.WARNING : ESYS_ToastMessageType.INFO
+        );
+    } else {
+        eda.sys_Message.showToastMessage(`Assemble complete.`, ESYS_ToastMessageType.SUCCESS);
+    }
+
+    // Snapshot the log on `window` as a belt-and-braces persistence channel
+    // for callers that can't await the return value (e.g. raw JSON import).
+    try { (window as any).__copilotLastAssemblyErrors = [...currentErrorLog]; } catch {}
+
+    return [...currentErrorLog];
 }

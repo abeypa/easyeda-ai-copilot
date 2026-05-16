@@ -368,8 +368,20 @@ class CircuitLayout:
                 # L-shaped route: right from source, then down/up to target
                 mid_x = (sx + tx) / 2
 
+                # v2.4.1: when pins are nearly horizontally aligned (≤15 units
+                # of vertical drift), snap the target Y to the source Y and
+                # emit a straight horizontal wire with no bend points. This
+                # dramatically improves EasyEDA's wire-create success rate
+                # because the API rejects wires whose endpoint doesn't land
+                # exactly on a pin or whose bend introduces a sub-grid
+                # segment. Previously the threshold was 5, which sent many
+                # nearly-aligned pairs (e.g. R1.2 → D1.1 at y=−855 vs −850)
+                # down the labeled-stub fallback path unnecessarily.
+                ALIGN_TOL = 15
                 bend_points: Optional[List[ElkPoint]] = None
-                if abs(sy - ty) > 5:
+                if abs(sy - ty) <= ALIGN_TOL:
+                    ty = sy  # snap for a clean straight horizontal run
+                else:
                     bend_points = [
                         ElkPoint(x=mid_x, y=sy),
                         ElkPoint(x=mid_x, y=ty),
@@ -422,8 +434,12 @@ class CircuitLayout:
             if name == "__ungrouped__":
                 continue
             
-            # Prefix block names with "block_" to match expected format
-            block_name = f"block_{name}"
+            # Prefix block names with "block_" to match expected format.
+            # v2.4.1: defensive strip — the LLM sometimes emits "block_Foo"
+            # because user-supplied prompts use that form; without this we
+            # produce "block_block_Foo" duplications visible in the chat panel.
+            clean = name[6:] if name.startswith("block_") else name
+            block_name = f"block_{clean}"
             result.append(BlockRect(
                 name=block_name,
                 description=block_desc_map.get(name, ""),

@@ -39,13 +39,24 @@ export async function resolveComponentUuids(
     );
 
     for (const comp of components) {
-        // Already resolved — skip
-        if (comp.part_uuid && comp.part_uuid.length === 32) { resolvedCount++; continue; }
         // Special markers — skip
         if (comp.part_uuid === 'GND' || comp.part_uuid === 'VCC') continue;
 
         const searchQuery = (comp as any).search_query || '';
         const value = comp.value || '';
+
+        // If we already have a resolved uuid AND libraryUuid, trust it and skip.
+        // A bare 32-char uuid without a libraryUuid is NOT enough — the LLM often
+        // hallucinates uuids, and placeComponent will fail with "Component not
+        // found" for any uuid that doesn't actually exist in the library.
+        // We must verify via eda.lib_Device.search() to obtain the real
+        // libraryUuid (and replace the uuid if it doesn't match a real device).
+        const hasResolvedUuid = comp.part_uuid && comp.part_uuid.length === 32;
+        const hasLibUuid = !!(comp as any)._libraryUuid;
+        if (hasResolvedUuid && hasLibUuid) { resolvedCount++; continue; }
+
+        // Preserve the LLM-provided uuid as a last-resort fallback.
+        const fallbackUuid = hasResolvedUuid ? comp.part_uuid : undefined;
 
         // Build search query list from most-specific to least-specific.
         const queries: string[] = [];
@@ -115,12 +126,22 @@ export async function resolveComponentUuids(
         }
 
         if (!found) {
-            failedCount++;
-            failedDesignators.push(comp.designator);
-            console.warn(
-                `[AI Copilot] Could not resolve UUID for ${comp.designator} (${value}). ` +
-                `Tried: ${queries.join(', ')}`
-            );
+            if (fallbackUuid) {
+                // Keep the LLM-provided uuid; placeComponent will try several
+                // library UUIDs. This may still succeed if the uuid is valid.
+                (comp as any).part_uuid = fallbackUuid;
+                resolvedCount++;
+                console.warn(
+                    `[AI Copilot] Search failed for ${comp.designator}; using LLM-provided uuid ${fallbackUuid} as fallback.`
+                );
+            } else {
+                failedCount++;
+                failedDesignators.push(comp.designator);
+                console.warn(
+                    `[AI Copilot] Could not resolve UUID for ${comp.designator} (${value}). ` +
+                    `Tried: ${queries.join(', ')}`
+                );
+            }
         }
     }
 

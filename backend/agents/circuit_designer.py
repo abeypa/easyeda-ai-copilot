@@ -41,11 +41,13 @@ SYSTEM_PROMPT = """You are a senior electronics design engineer. Your task is to
 - Generate one edge per connection mentioned. Do NOT silently drop pins.
 - Place a GND symbol (signal_name="GND") on every ground pin the user lists.
 
-You will receive:
-1. A block diagram (blocks with descriptions)
-2. A component list with initial pin assignments
-
-Your job is to OUTPUT the FINAL, CORRECTED component list with validated pin connections.
+## CRITICAL SIGNAL NAME CONSISTENCY — NEVER VIOLATE
+- **IDENTICAL signal names = electrically connected**
+- If R1 pin 2 = "VCC_3V3", then U1 VCC must also = "VCC_3V3" (NOT "VCC" or "3V3" or "VCC3V3")
+- If U1 OUT = "UART_TX", then J1 pin 3 must = "UART_TX"
+- Power nets: use EXACTLY one of: GND, VCC_3V3, VCC_5V, VCC_12V, VIN, VBAT, VDD, VCC
+- Do NOT create variants like "3.3V" vs "VCC_3V3" — pick one canonical name and use it everywhere
+- Do NOT leave power pins as "NC" — every IC needs VCC and GND connected
 
 ## Output Format
 
@@ -71,12 +73,6 @@ Return ONLY valid JSON — the same structure as the input components list, but 
 
 ## Pin Connection Rules — CRITICAL
 
-### Signal Name Consistency
-- **IDENTICAL signal names = electrically connected**
-- If R1 pin 2 = "VCC_3V3", then U1 VCC = "VCC_3V3" (not "VCC" or "3V3")
-- If U1 OUT = "UART_TX", then J1 pin 3 = "UART_TX"
-- Power nets: use EXACTLY one of: GND, VCC, VCC_3V3, VCC_5V, VCC_12V, VIN, VBAT
-
 ### Required Connections
 1. **Every IC needs**: VCC (or supply) and GND connected
 2. **Every IC needs bypass caps**: 100nF capacitor between VCC pin and GND
@@ -95,6 +91,14 @@ Return ONLY valid JSON — the same structure as the input components list, but 
 - LEDs: A (Anode = +), K or C (Cathode = -)
 - Crystal: pin 1, pin 2 (or XIN, XOUT)
 
+### Passive Component Signal Naming
+- Resistors between two signals: pin1 = source_signal, pin2 = target_signal
+- Pull-up resistors: pin1 = VCC_3V3 (or VCC_5V), pin2 = the pulled-up signal
+- Pull-down resistors: pin1 = GND, pin2 = the pulled-down signal
+- Current limiting resistors: pin1 = source (e.g. GPIO), pin2 = load (e.g. LED anode)
+- Capacitors: pin1 = positive rail (VCC_3V3 etc.), pin2 = GND
+- Bypass capacitors: ALWAYS pin1 = VCC_3V3/VCC_5V (matching the IC supply), pin2 = GND
+
 ### Floating Pins
 - Unused IC inputs: connect to GND or VCC via pull-up/pull-down (do NOT leave floating)
 - MOSFET gates: always have a pull-down resistor to GND
@@ -102,14 +106,15 @@ Return ONLY valid JSON — the same structure as the input components list, but 
 - "NC" is acceptable only for truly unused IC pins per datasheet
 
 ### Design Verification Checklist
-□ Every component has GND connection
-□ Every IC has VCC/power connection
+□ Every component has GND connection (or is a passive floating between two non-GND signals)
+□ Every IC has VCC/VDD power connection
 □ Signal names exactly match between connected components
-□ No signal name appears only once (except power rails like GND, VCC)
+□ No signal name appears only once (except power rails like GND, VCC_3V3)
 □ I2C: SDA and SCL connected to all I2C devices + pull-up resistors
 □ UART: TX/RX correctly crossed between master and slave
+□ Bypass capacitors present for every IC
 
-Return ONLY the JSON array of components. No explanation, no markdown.
+Return ONLY the JSON array of components. No explanation, no markdown. Start with [ and end with ].
 """
 
 
@@ -134,8 +139,10 @@ async def run_circuit_designer(
             content=(
                 f"Block diagram:\n```json\n{blocks_json}\n```\n\n"
                 f"Components with initial pin assignments:\n```json\n{components_json}\n```\n\n"
-                f"Review all pin connections, fix signal name inconsistencies, "
-                f"ensure all required connections are present, and return the corrected component list."
+                f"Review ALL pin connections. Fix ANY signal name inconsistencies. "
+                f"Ensure EVERY IC has VCC and GND connected. "
+                f"Ensure bypass capacitors are connected to the SAME VCC net as their IC. "
+                f"Return the corrected component list as JSON."
             ),
         ),
     ]

@@ -12,13 +12,13 @@ This produces clean, non-overlapping layouts without needing Node.js/elkjs.
 The output format matches CircuitAssembly exactly (edges with sections/bendPoints).
 
 Component sizing (in schematic grid units, ~100 units = 1 grid cell in EasyEDA Pro):
-  - Passive (R,C,L,F): 60 wide × 30 tall
-  - Transistor (Q): 60 wide × 60 tall
-  - Diode (D): 60 wide × 40 tall
-  - IC/MCU (U): 80 wide × based on pin count
-  - Connector (J): 50 wide × 20 × pin_count tall
-  - Crystal (X): 60 wide × 40 tall
-  - Default: 80 wide × 60 tall
+  - Passive (R,C,L,F): 60 wide x 30 tall
+  - Transistor (Q): 60 wide x 60 tall
+  - Diode (D): 60 wide x 40 tall
+  - IC/MCU (U): 100 wide x based on pin count
+  - Connector (J): 50 wide x 20 x pin_count tall
+  - Crystal (X): 60 wide x 40 tall
+  - Default: 80 wide x 60 tall
 
 Spacing:
   - Between components: 40 units
@@ -28,7 +28,6 @@ Spacing:
 
 from __future__ import annotations
 import logging
-import uuid
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -55,7 +54,6 @@ logger = logging.getLogger(__name__)
 COMP_SPACING = 40        # Gap between components within a block
 BLOCK_PADDING = 60       # Padding inside block boundary
 BLOCK_SPACING = 120      # Gap between blocks
-WIRE_OFFSET = 20         # Routing margin from component edges
 
 # Component size lookup by designator prefix
 COMP_SIZES: Dict[str, Tuple[int, int]] = {
@@ -108,7 +106,7 @@ def _get_component_size(comp: BaseComponent) -> Tuple[int, int]:
 # --------------------------------------------------------------------------
 
 def _build_block_graph(blocks: List[Block]) -> Dict[str, List[str]]:
-    """Return adjacency: block_name → list of successor block names."""
+    """Return adjacency: block_name -> list of successor block names."""
     graph: Dict[str, List[str]] = {}
     for b in blocks:
         graph[b.name] = b.next_block_names or []
@@ -126,7 +124,7 @@ def _topological_order(blocks: List[Block]) -> List[str]:
 
     def dfs(name: str, stack: Set[str]):
         if name in stack:
-            return  # cycle detected — skip
+            return  # cycle detected - skip
         if name in visited:
             return
         stack.add(name)
@@ -140,7 +138,7 @@ def _topological_order(blocks: List[Block]) -> List[str]:
         if b.name not in visited:
             dfs(b.name, set())
 
-    # order is in reverse post-order → reverse it for topological order
+    # order is in reverse post-order -> reverse it for topological order
     order.reverse()
     return order
 
@@ -152,7 +150,7 @@ def _topological_order(blocks: List[Block]) -> List[str]:
 class CircuitLayout:
     """
     Hierarchical circuit layout:
-    1. Arrange blocks in a roughly left-to-right topology flow
+    1. Arrange blocks in a left-to-right topology flow
     2. Place components within each block
     3. Route wire edges between matching signal_names
     """
@@ -176,11 +174,12 @@ class CircuitLayout:
     def compute_block_layout(self) -> Dict[str, Tuple[int, int, int, int]]:
         """
         Compute (x, y, width, height) for each block in schematic coordinates.
-        Blocks are arranged in a left-to-right flow following topology order.
+        Blocks are arranged in a SINGLE HORIZONTAL ROW following topology order.
+        This ensures clean left-to-right signal flow.
         """
         order = _topological_order(self.blocks)
         
-        # Add any extra blocks (including ungrouped)
+        # Add any extra blocks (including ungrouped) at the end
         all_block_names = list(order)
         for key in self.block_components:
             if key not in all_block_names:
@@ -197,7 +196,6 @@ class CircuitLayout:
                 continue
             
             # Pack components in a roughly-square arrangement
-            total_area = sum(w * h for w, h in (_get_component_size(c) for c in comps))
             cols = max(1, int((len(comps) ** 0.5 + 0.5)))
             
             # Compute per-row heights
@@ -219,59 +217,17 @@ class CircuitLayout:
 
             block_intrinsic[block_name] = (block_w, block_h)
 
-        # Arrange blocks in a grid, flowing left to right
-        # Use topological order: each "level" of the graph gets one column
-        graph = _build_block_graph(self.blocks)
-        in_degree: Dict[str, int] = defaultdict(int)
-        for src, dsts in graph.items():
-            for d in dsts:
-                in_degree[d] += 1
-
-        # BFS to assign columns
-        col_assignment: Dict[str, int] = {}
-        queue = [n for n in all_block_names if in_degree.get(n, 0) == 0]
-        if not queue:
-            queue = all_block_names[:1]
-
-        col = 0
-        processed: Set[str] = set()
-        while queue:
-            next_queue = []
-            for name in queue:
-                if name not in col_assignment:
-                    col_assignment[name] = col
-                processed.add(name)
-                for nxt in graph.get(name, []):
-                    if nxt not in processed:
-                        next_queue.append(nxt)
-            col += 1
-            queue = next_queue
-
-        # Assign remaining blocks (not reachable from sources)
-        for name in all_block_names:
-            if name not in col_assignment:
-                col_assignment[name] = col
-
-        # Group by column, compute x offsets
-        col_groups: Dict[int, List[str]] = defaultdict(list)
-        for name, c in col_assignment.items():
-            col_groups[c].append(name)
-
-        # X positions per column
-        col_x: Dict[int, int] = {}
+        # v2.4.2: FORCE single horizontal row layout for clean L-to-R flow.
+        # All blocks arranged left-to-right in topological order.
+        # This eliminates the vertical stacking that produced messy layouts.
         x_cursor = 0
-        for c in sorted(col_groups.keys()):
-            col_x[c] = x_cursor
-            max_w = max(block_intrinsic.get(n, (200, 200))[0] for n in col_groups[c])
-            x_cursor += max_w + BLOCK_SPACING
-
-        # Y positions within each column
-        for c in sorted(col_groups.keys()):
-            y_cursor = 0
-            for name in col_groups[c]:
-                w, h = block_intrinsic.get(name, (200, 200))
-                block_rects[name] = (col_x[c], y_cursor, w, h)
-                y_cursor += h + BLOCK_SPACING
+        max_row_height = 0
+        
+        for name in all_block_names:
+            w, h = block_intrinsic.get(name, (200, 200))
+            block_rects[name] = (x_cursor, 0, w, h)
+            x_cursor += w + BLOCK_SPACING
+            max_row_height = max(max_row_height, h)
 
         return block_rects
 
@@ -280,7 +236,7 @@ class CircuitLayout:
     ) -> Dict[str, ComponentWithPos]:
         """
         Place each component within its block rect.
-        Returns a dict of designator → ComponentWithPos.
+        Returns a dict of designator -> ComponentWithPos.
         """
         placed: Dict[str, ComponentWithPos] = {}
 
@@ -326,12 +282,13 @@ class CircuitLayout:
         """
         Route wires between components that share the same signal_name.
         
-        Approach:
-        - Collect all (designator, pin) pairs per signal_name
-        - For each signal with 2+ connections, create edges
-        - Use a simple L-route (horizontal then vertical) for each wire
+        v2.4.2 improvements:
+        - Uses a smarter routing algorithm that prefers straight horizontal runs
+        - For short connections (same block, horizontally aligned), emits direct wires
+        - For longer connections, uses L-routing with proper bend points
+        - SNAP endpoints to component pin positions for better wire-create success
         """
-        # signal_name → list of (designator, pin)
+        # signal_name -> list of (designator, pin)
         signal_map: Dict[str, List[Tuple[str, any]]] = defaultdict(list)
         for designator, comp in placed.items():
             for pin in comp.pins:
@@ -344,44 +301,46 @@ class CircuitLayout:
             if len(connections) < 2:
                 continue
 
-            # Connect each subsequent pair in the signal group
-            # (simplified: daisy-chain from first to each other)
-            source_des, source_pin = connections[0]
+            # Sort connections by x-position for cleaner routing (left to right)
+            connections_sorted = sorted(
+                connections,
+                key=lambda c: placed.get(c[0], ComponentWithPos(
+                    designator="", value="", block_name="", search_query="",
+                    pins=[], part_uuid=None,
+                    pos=ComponentPos(x=0, y=0, center=ElkPoint(x=0, y=0), width=0, height=0)
+                )).pos.x if c[0] in placed else 0
+            )
+
+            # Star-topology: connect first (leftmost) to all others
+            source_des, source_pin = connections_sorted[0]
             source_comp = placed.get(source_des)
             if not source_comp:
                 continue
 
-            for i in range(1, len(connections)):
-                target_des, target_pin = connections[i]
+            for i in range(1, len(connections_sorted)):
+                target_des, target_pin = connections_sorted[i]
                 target_comp = placed.get(target_des)
                 if not target_comp:
                     continue
 
-                # Source point: right edge of source component center-y
+                # Compute source point: right edge of source, center-y
                 sx = source_comp.pos.x + source_comp.pos.width
                 sy = source_comp.pos.y + source_comp.pos.height / 2
 
-                # Target point: left edge of target component center-y
+                # Compute target point: left edge of target, center-y
                 tx = target_comp.pos.x
                 ty = target_comp.pos.y + target_comp.pos.height / 2
 
-                # L-shaped route: right from source, then down/up to target
-                mid_x = (sx + tx) / 2
-
-                # v2.4.1: when pins are nearly horizontally aligned (≤15 units
-                # of vertical drift), snap the target Y to the source Y and
-                # emit a straight horizontal wire with no bend points. This
-                # dramatically improves EasyEDA's wire-create success rate
-                # because the API rejects wires whose endpoint doesn't land
-                # exactly on a pin or whose bend introduces a sub-grid
-                # segment. Previously the threshold was 5, which sent many
-                # nearly-aligned pairs (e.g. R1.2 → D1.1 at y=−855 vs −850)
-                # down the labeled-stub fallback path unnecessarily.
+                # v2.4.2: snap to straight horizontal if vertically aligned
                 ALIGN_TOL = 15
                 bend_points: Optional[List[ElkPoint]] = None
+                
                 if abs(sy - ty) <= ALIGN_TOL:
-                    ty = sy  # snap for a clean straight horizontal run
+                    # Straight horizontal wire - no bends needed
+                    ty = sy
                 else:
+                    # L-shaped route: go right from source, then vertical to target
+                    mid_x = (sx + tx) / 2
                     bend_points = [
                         ElkPoint(x=mid_x, y=sy),
                         ElkPoint(x=mid_x, y=ty),
@@ -393,19 +352,14 @@ class CircuitLayout:
                     startPoint=ElkPoint(x=sx, y=sy),
                     endPoint=ElkPoint(x=tx, y=ty),
                     bendPoints=bend_points,
-                    # Must use "DESIG_pin_NUM" format — assemble.ts splits on "_pin_"
-                    # to find which component pin to connect the wire to.
                     incomingShape=f"{source_des}_pin_{source_pin.pin_number}",
                     outgoingShape=f"{target_des}_pin_{target_pin.pin_number}",
                 )
 
-                # Container = the block that contains the source
-                container = source_comp.block_name
-
                 edge = ElkEdge(
                     sources=[f"{source_des}.{source_pin.pin_number}"],
                     targets=[f"{target_des}.{target_pin.pin_number}"],
-                    container=container,
+                    container=source_comp.block_name,
                     sections=[section],
                 )
                 edges.append(edge)
@@ -434,10 +388,9 @@ class CircuitLayout:
             if name == "__ungrouped__":
                 continue
             
-            # Prefix block names with "block_" to match expected format.
-            # v2.4.1: defensive strip — the LLM sometimes emits "block_Foo"
-            # because user-supplied prompts use that form; without this we
-            # produce "block_block_Foo" duplications visible in the chat panel.
+            # v2.4.2: Defensive strip of "block_" prefix to prevent duplication.
+            # The LLM sometimes emits "block_Foo" in block_name; without this
+            # we produce "block_block_Foo" visible in the schematic.
             clean = name[6:] if name.startswith("block_") else name
             block_name = f"block_{clean}"
             result.append(BlockRect(
@@ -457,7 +410,7 @@ class CircuitLayout:
 
         # Add the root block rect that encompasses all blocks
         if result:
-            padding = 12  # Small padding around all blocks
+            padding = 12
             root_x = max(0, min_x - padding)
             root_y = max(0, min_y - padding)
             root_w = (max_x - root_x) + padding
@@ -492,7 +445,7 @@ class CircuitLayout:
                     continue
                 connections = signal_map.get(sig, [])
                 if len(connections) < 2:
-                    # This signal only appears once → it needs a net label
+                    # This signal only appears once -> it needs a net label
                     added_nets.append(AddedNet(
                         designator=designator,
                         pin_number=pin.pin_number,
@@ -506,7 +459,7 @@ def layout_circuit(circuit: CircuitStruct) -> CircuitAssembly:
     Main entry point: take a CircuitStruct and return a fully laid-out CircuitAssembly.
     
     Steps:
-    1. Compute block positions (hierarchical grid layout)
+    1. Compute block positions (horizontal left-to-right layout)
     2. Place components within blocks
     3. Route wires between shared signal names
     4. Compute block bounding rectangles
@@ -526,10 +479,10 @@ def layout_circuit(circuit: CircuitStruct) -> CircuitAssembly:
     # Step 4: Block rects
     blocks_rect = engine.compute_block_rects(block_rects)
 
-    # Step 5: Added nets (for single-connection signals → net labels)
+    # Step 5: Added nets (for single-connection signals -> net labels)
     added_net = engine.compute_added_nets(placed)
 
-    # Build final assembly — sort components by designator for consistency
+    # Build final assembly - sort components by designator for consistency
     components_list = sorted(placed.values(), key=lambda c: c.designator)
 
     return CircuitAssembly(

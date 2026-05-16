@@ -45,8 +45,9 @@ Return ONLY valid JSON matching this exact schema:
 
 ## Rules
 
-1. **Block names**: Short, unique, PascalCase or snake_case. No spaces. Max 20 chars.
-   Examples: "PowerSupply", "SignalAmplifier", "MCU", "USB_Interface", "Display"
+1. **Block names**: Short, unique, PascalCase or snake_case. No spaces. No "block_" prefix. Max 20 chars.
+   CORRECT: "PowerSupply", "SignalAmplifier", "MCU", "USB_Interface", "Display"
+   WRONG: "block_PowerSupply", "Power Supply", "power supply"
 
 2. **Signal flow**: `next_block_names` shows where the OUTPUT of this block goes.
    - Power supply block → sends power to all other blocks
@@ -63,7 +64,7 @@ Return ONLY valid JSON matching this exact schema:
    - If the user describes a SIMPLE / TEST / BASIC circuit, OR the circuit will have **8 or fewer components total**, output EXACTLY ONE block named `UserDefined` containing every component. Do NOT split a 3-component LED test into PowerInput / CurrentLimit / LED — collapse it into one block.
    - Keywords that ALWAYS force a single `UserDefined` block: "simple", "test", "basic", "demo", "minimal", "smoke test", "sanity check", "blink test", "LED test".
    - For larger circuits, aim for 3-8 blocks. Don't over-segment.
-   - Simple LED blinker (≤8 parts): 1 block (UserDefined)
+   - Simple LED blinker (<=8 parts): 1 block (UserDefined)
    - Audio amplifier: 4-5 blocks (Power, Input Filter, Preamp, Output Stage, Speaker Protection)
    - IoT device: 5-7 blocks (Power, MCU, Sensor, Communication, Display, Battery Monitor)
 
@@ -72,11 +73,7 @@ Return ONLY valid JSON matching this exact schema:
 ## Examples
 
 For "Arduino-based temperature logger with LCD display":
-- PowerSupply: 5V USB or battery input with LDO regulator
-- MCU: Arduino Uno / ATmega328P microcontroller
-- TempSensor: DS18B20 one-wire temperature sensor
-- LCD_Display: 16x2 character LCD with I2C backpack
-- DataStorage: SD card module for data logging
+- UserDefined (single block, <=8 components)
 
 For "Class D audio amplifier with Bluetooth input":
 - PowerSupply: 12-24V DC input with filtering
@@ -141,9 +138,17 @@ async def run_architect(
     # Parse and validate the JSON response
     try:
         data = response.extract_json()
+        
+        # Sanitize block names: strip any "block_" prefix that the LLM might have added
+        blocks_raw = data.get("blocks", [])
+        for b in blocks_raw:
+            name = b.get("name", "")
+            if name.startswith("block_"):
+                b["name"] = name[6:]  # strip "block_" prefix
+        
         result = CircuitBlocks(
             metadata=CircuitMetadata(**data["metadata"]),
-            blocks=[Block(**b) for b in data["blocks"]],
+            blocks=[Block(**b) for b in blocks_raw],
         )
         logger.info(f"Architect produced {len(result.blocks)} blocks: {[b.name for b in result.blocks]}")
         return result

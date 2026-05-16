@@ -747,6 +747,9 @@ export async function assembleCircuit(circuit: CircuitAssembly): Promise<Assembl
     // v2.3.7: reset the per-run error log; recordToast() will populate it.
     currentErrorLog = [];
 
+    // v2.4.2: read assembly_options for draw_blocks preference
+    const drawBlocks = circuit.assembly_options?.draw_blocks ?? true;
+
     eda.sys_Message.showToastMessage(`Assemble circuit...`, ESYS_ToastMessageType.INFO);
     if (eda.checkpointer) await eda.checkpointer.save(true);
     else eda.sys_Message.showToastMessage(`Checkpointer is null`, ESYS_ToastMessageType.INFO);
@@ -838,7 +841,11 @@ export async function assembleCircuit(circuit: CircuitAssembly): Promise<Assembl
     const placedComp = await placeComponents(circuit.components, offset);
 
     await drawEdges(circuit.edges, circuit.components, placedComp, offset);
-    await drawRect(circuit.blocks_rect, offset);
+    // v2.4.2: only draw block rectangles when draw_blocks is true.
+    // For simple single-block circuits, disabling this gives a cleaner look.
+    if (drawBlocks) {
+        await drawRect(circuit.blocks_rect, offset);
+    }
 
     const isUsedPin = (d: string, p: number | string) => {
         // Hardened v2.3.5: null-safe sections + explicit string coercion so

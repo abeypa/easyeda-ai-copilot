@@ -111,6 +111,22 @@
                 <pre class="block-diagram-json">{{ formatBlockDiagram(result.blockDiagram) }}</pre>
             </div>
 
+            <!-- Export section -->
+            <div v-if="result?.circuit?.components?.length" class="export-section">
+                <h3>Export</h3>
+                <div class="export-buttons">
+                    <button class="export-btn" @click="exportBomCsv" title="Export BOM as CSV">
+                        {{ bomExportStatus }}
+                    </button>
+                    <button class="export-btn" @click="exportGostBom" title="Export BOM in GOST format">
+                        {{ gostExportStatus }}
+                    </button>
+                    <button class="export-btn" @click="exportSpiceNetlist" title="Export SPICE Netlist">
+                        {{ spiceExportStatus }}
+                    </button>
+                </div>
+            </div>
+
             <div class="project-footer">
                 <div class="footer-buttons">
                     <IconButton class="assemble-button" variant="primary" @click="assembleCircuitHandler" icon="Play">
@@ -133,6 +149,8 @@ import { InlineButton } from '../../../types/inline-button';
 import { assembleCircuit } from '../../../eda/assemble-circuit';
 import { resolveComponentUuids } from '../../../eda/resolve-uuids';
 import { showToastMessage } from '../../../eda/utils';
+import { generateBomCsv, generateGostBomCsv, downloadFile } from '../../../utils/export/bom-export';
+import { generateSpiceNetlist, downloadSpiceNetlist } from '../../../utils/export/spice-export';
 
 // Inline StockBadge sub-component
 const StockBadge = defineComponent({
@@ -189,6 +207,9 @@ const assemblyErrors = computed(() => {
 const assemblingBlock = ref<string | null>(null);
 const copyStatus = ref('Copy Full JSON');
 const copyBdStatus = ref('Copy JSON');
+const bomExportStatus = ref('📄 BOM (CSV)');
+const gostExportStatus = ref('🏭 GOST BOM');
+const spiceExportStatus = ref('⚡ SPICE Netlist');
 
 function formatBlockDiagram(bd: any): string {
     try {
@@ -233,6 +254,58 @@ async function copyBlockDiagram() {
         copyBdStatus.value = 'Copied!';
         setTimeout(() => { copyBdStatus.value = 'Copy JSON'; }, 2000);
     }
+}
+
+function exportBomCsv() {
+    if (!props.result?.circuit?.components?.length) return;
+    const items = props.result.circuit.components.map((c: any) => ({
+        designator: c.designator,
+        value: c.value,
+        search_query: c.search_query || c.value,
+        part_uuid: c.part_uuid,
+        block_name: c.block_name,
+        pins: c.pins?.length || 0,
+    }));
+    const csv = generateBomCsv(items);
+    const projectName = props.result?.circuit?.metadata?.project_name?.replace(/\s+/g, '_') || 'circuit';
+    downloadFile(csv, `${projectName}_BOM.csv`);
+    bomExportStatus.value = '\u2713 BOM Exported';
+    setTimeout(() => { bomExportStatus.value = '\ud83d\udcc4 BOM (CSV)'; }, 3000);
+}
+
+function exportGostBom() {
+    if (!props.result?.circuit?.components?.length) return;
+    const items = props.result.circuit.components.map((c: any) => ({
+        designator: c.designator,
+        value: c.value,
+        search_query: c.search_query || c.value,
+        part_uuid: c.part_uuid,
+        block_name: c.block_name,
+        pins: c.pins?.length || 0,
+    }));
+    const csv = generateGostBomCsv(items);
+    const projectName = props.result?.circuit?.metadata?.project_name?.replace(/\s+/g, '_') || 'circuit';
+    downloadFile(csv, `${projectName}_BOM_GOST.csv`);
+    gostExportStatus.value = '\u2713 GOST Exported';
+    setTimeout(() => { gostExportStatus.value = '\ud83c\udfed GOST BOM'; }, 3000);
+}
+
+function exportSpiceNetlist() {
+    if (!props.result?.circuit?.components?.length) return;
+    const comps = props.result.circuit.components.map((c: any) => ({
+        designator: c.designator,
+        value: c.value,
+        pins: (c.pins || []).map((p: any) => ({
+            pin_number: p.pin_number,
+            name: p.name,
+            signal_name: p.signal_name,
+        })),
+        block_name: c.block_name,
+    }));
+    const projectName = props.result?.circuit?.metadata?.project_name || 'circuit';
+    downloadSpiceNetlist(comps, projectName);
+    spiceExportStatus.value = '\u2713 SPICE Exported';
+    setTimeout(() => { spiceExportStatus.value = '\u26a1 SPICE Netlist'; }, 3000);
 }
 
 /**
@@ -699,5 +772,46 @@ onMounted(() => {
     gap: 0.75rem;
     align-items: center;
     flex-wrap: wrap;
+}
+
+/* Export section */
+.export-section {
+    padding-top: 1rem;
+    border-top: 1px solid var(--color-border);
+}
+
+.export-section h3 {
+    margin: 0 0 0.75rem 0;
+    font-size: 1.1rem;
+    color: var(--color-text-primary);
+}
+
+.export-buttons {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.export-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    font-size: 0.72rem;
+    background: var(--color-background-secondary);
+    color: var(--color-text-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s;
+    font-family: inherit;
+}
+
+.export-btn:hover {
+    background: var(--color-surface-hover);
+    color: var(--color-text-primary);
+    border-color: var(--color-primary);
 }
 </style>

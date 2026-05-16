@@ -128,7 +128,11 @@ async function createComponet(component: CircuitAssembly['components'][0], offse
         return undefined;
     }
 
-    const { x, y } = applyOffset(pos.x + (pos.center?.x ?? (pos.width / 2)), (pos.y + (pos.center?.y ?? (pos.height / 2))), offset)
+    // center is an ABSOLUTE coordinate (elk_layout sets it to x_cursor + w/2),
+    // so use it directly; fall back to computing from pos.x/y + half-size.
+    const centerX = pos.center?.x ?? (pos.x + pos.width / 2);
+    const centerY = pos.center?.y ?? (pos.y + pos.height / 2);
+    const { x, y } = applyOffset(centerX, centerY, offset);
 
     if (partUuid === 'GND') {
         comp = await placeComponent({
@@ -253,8 +257,10 @@ const findPin = async (designator: string, pin_: { num: number | string, name?: 
 async function drawEdges(edges: CircuitAssembly['edges'], components: CircuitAssembly['components'],
     placeComponents: PlacedComponents, offset: Offset = { x: 0, y: 0 }) {
     const pointToArr = (p: { x: number, y: number }) => {
+        // applyOffset converts layout coords → EasyEDA coords (same Y convention
+        // as getState_Y / eda.sch_PrimitiveWire.create); do NOT negate y.
         const { x, y } = applyOffset(p.x, p.y, offset);
-        return [x, -y];
+        return [x, y];
     }
 
     const searchSignalName = (designator: string, pin: string | number) => {
@@ -684,10 +690,19 @@ export async function assembleCircuit(circuit: CircuitAssembly) {
         }
     }
 
+    // Build a set of pins already covered by circuit.added_net so we don't
+    // stamp a second wire-stub on the same pin from netForUnusedPins.
+    const addedNetPinSet = new Set(
+        (circuit.added_net ?? []).map(n => `${n.designator}_pin_${n.pin_number}`)
+    );
+
     const netForUnusedPins: AddedNet[] = [];
     for (const component of circuit.components) {
         for (const pin of component.pins) {
-            if (!isUsedPin(component.designator, pin.pin_number) && pin.signal_name.length) {
+            const pinKey = `${component.designator}_pin_${pin.pin_number}`;
+            if (!isUsedPin(component.designator, pin.pin_number)
+                && !addedNetPinSet.has(pinKey)
+                && pin.signal_name.length) {
                 netForUnusedPins.push({
                     designator: component.designator,
                     net: pin.signal_name,

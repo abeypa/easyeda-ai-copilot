@@ -167,7 +167,9 @@ app.add_middleware(
 LCSC_NUMBER_RE = re.compile(r'\bC\d{5,8}\b')
 
 # Matches schematic designators: J1, D1, R12, U3, Q2, SW1, LED1, etc.
-DESIGNATOR_RE = re.compile(r'\b([A-Z]{1,3}\d+)\b')
+# CRITICAL: excludes LCSC C-numbers (C + 5-8 digits) which are NOT designators.
+# Negative lookahead (?!C\d{5,8}\b) rejects "C21190" but keeps "C1", "C23" (capacitors).
+DESIGNATOR_RE = re.compile(r'\b(?!C\d{5,8}\b)([A-Z]{1,3}\d+)\b', re.IGNORECASE)
 
 CIRCUIT_KEYWORDS = [
     "draw", "design", "create", "build", "make", "generate", "circuit", "schematic",
@@ -197,19 +199,33 @@ EXPLAIN_KEYWORDS = [
 def is_structured_component_list(content: str) -> bool:
     """
     Return True when the message contains a structured component list with at least
-    two explicit LCSC C-numbers and two schematic designators.
+    two schematic designators AND at least one LCSC C-number or explicit colon format.
 
     Recognises formats such as:
-      | J1 | DB142V-5.08-4P-GN | 4-pin connector | 4 | C2898701 |
-      J1 DB142V-5.08-4P-GN C2898701
+      | J1 | DB142V-5.08-4P-GN | 4 | C2898701 |      (table)
+      D1: SMDJ26CA TVS, LCSC C2890438, SMA            (colon format)
+      pin 1 (Cathode) → VIN_RAW                       (pin assignment)
     """
-    lcsc_numbers = LCSC_NUMBER_RE.findall(content)
-    if len(lcsc_numbers) < 2:
-        return False
+    # Must have at least 2 designators (J1, D1, R1, etc — NOT LCSC C-numbers)
     designators = DESIGNATOR_RE.findall(content)
     if len(designators) < 2:
         return False
-    return True
+
+    # Must have at least 1 LCSC C-number OR explicit pin assignment arrows
+    lcsc_numbers = LCSC_NUMBER_RE.findall(content)
+    has_arrows = '→' in content or '->' in content
+    if len(lcsc_numbers) < 1 and not has_arrows:
+        return False
+
+    # Must have colon format (D1: ...) OR table format (| D1 | ...) OR explicit pin lines
+    has_colon_format = bool(re.search(r'^[A-Z]+\d+\s*:', content, re.IGNORECASE | re.MULTILINE))
+    has_table_format = '|' in content and len(lcsc_numbers) >= 1
+    has_pin_lines = bool(re.search(r'^pin\s+\d+', content, re.IGNORECASE | re.MULTILINE))
+
+    if has_colon_format or has_table_format or has_pin_lines:
+        return True
+
+    return False
 
 
 def parse_structured_components(content: str) -> List["BaseComponent"]:
@@ -227,64 +243,270 @@ def parse_structured_components(content: str) -> List["BaseComponent"]:
     components: List[BaseComponent] = []
     seen: set = set()
 
-    # --- Strategy 1: strict markdown table row ---
-    table_re = re.compile(
-        r'\|\s*([A-Z]{1,3}\d+)\s*\|\s*([^\|]+?)\s*\|\s*([^\|]*?)\s*\|'
-        r'(?:\s*(\d+)\s*\|)?\s*(C\d{5,8})\s*\|',
-        re.IGNORECASE,
+    return _parse_structured_components_v2(content)
+
+
+def _parse_structured_components_v2(content: str) -> List["BaseComponent"]:
+    """
+    v2.4.2 Complete rewrite — handles direct component specification format:
+
+      D1: SMDJ26CA TVS diode, LCSC C2890438, SMA
+      pin 1 (Cathode) → VIN_RAW
+      pin 2 (Anode) → GND
+      Connect: VIN_PROTECTED → R1 → LED1 anode
+      LED1 cathode → GND
+
+    Returns components with correct designators, values, LCSC numbers,
+    pin names, and signal connections.
+    """
+    import re
+    from collections import OrderedDict
+    from models.circuit import Pin as PinCls
+
+    comp_line_re = re.compile(
+        r'^([A-Z]+\d+)\s*:\s*(.+?)(?:\s*,\s*LCSC\s+(C\d{5,8}))?(?:\s*,\s*(.+))?$',
+        re.IGNORECASE | re.MULTILINE
     )
-    for m in table_re.finditer(content):
-        designator = m.group(1).strip().upper()
-        value      = m.group(2).strip()
-        pin_count  = int(m.group(4)) if m.group(4) else 2
-        lcsc       = m.group(5).strip()
+    pin_line_re = re.compile(
+        r'^pin\s+(\d+)\s*(?:\(([^)]+)\))?\s*→\s*(\S+)',
+        re.IGNORECASE | re.MULTILINE
+    )
 
-        if designator in seen:
+    def detect_pins(val: str, extra: str) -> int:
+        text = f"{val} {extra or ''}"
+        m = re.search(r'(?:exactly\s+)?(\d+)\s*pins?', text, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        m = re.search(r'(\d+)[-\s]pin', text, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        if re.search(r'\bSOT-23-3\b', text, re.IGNORECASE):
+            return 3
+        if re.search(r'\bSOT-23\b', text, re.IGNORECASE):
+            return 3
+        if re.search(r'\bSOT-23-6\b', text, re.IGNORECASE):
+            return 6
+        if re.search(r'\bSOIC-8\b', text, re.IGNORECASE):
+            return 8
+        if re.search(r'\bSOIC-14\b', text, re.IGNORECASE):
+            return 14
+        return 2
+
+    def default_pin_name(designator: str, pin_num: int, total_pins: int) -> str:
+        prefix = re.sub(r'\d+$', '', designator).upper()
+        if total_pins > 2:
+            return str(pin_num)
+        defaults = {
+            'R': {1: '1', 2: '2'},
+            'C': {1: '+', 2: '-'},
+            'L': {1: '1', 2: '2'},
+            'D': {1: 'C', 2: 'A'},
+            'LED': {1: 'A', 2: 'K'},
+            'J': {1: '1', 2: '2'},
+            'P': {1: '1', 2: '2'},
+            'F': {1: '1', 2: '2'},
+        }
+        return defaults.get(prefix, {}).get(pin_num, str(pin_num))
+
+    # ── 1. Parse component declarations ──
+    comp_map: OrderedDict[str, dict] = OrderedDict()
+
+    # Strategy A: colon format — D1: value, LCSC C12345
+    for m in comp_line_re.finditer(content):
+        des = m.group(1).upper()
+        val = m.group(2).strip()
+        lcsc = m.group(3)
+        extra = (m.group(4) or '').strip()
+        comp_map[des] = {
+            'designator': des,
+            'value': val,
+            'lcsc': lcsc,
+            'extra': extra,
+            'pins': {},
+            'pin_count': detect_pins(val, extra),
+        }
+
+    # Strategy B: table format — | R1 | 10k | 2 | C21190 |
+    # or: | R1 | 10k | C21190 | (3 columns)
+    if not comp_map:
+        table_re = re.compile(
+            r'\|\s*([A-Z]+\d+)\s*\|\s*([^\|]+?)\s*\|'
+            r'(?:\s*(\d+)\s*\|)?'  # optional pin count column
+            r'(?:\s*(C\d{5,8})?\s*\|)?',  # optional LCSC column
+            re.IGNORECASE,
+        )
+        for m in table_re.finditer(content):
+            des = m.group(1).upper()
+            val = m.group(2).strip()
+            pin_count_str = m.group(3)
+            lcsc = m.group(4)
+            if des not in comp_map:
+                pcount = int(pin_count_str) if pin_count_str else detect_pins(val, '')
+                comp_map[des] = {
+                    'designator': des,
+                    'value': val,
+                    'lcsc': lcsc,
+                    'extra': '',
+                    'pins': {},
+                    'pin_count': pcount,
+                }
+
+    # Strategy C: no-colon format — R1 10k resistor, LCSC C21190
+    # SAFE: requires "LCSC" keyword so C-numbers are never mistaken for designators
+    if not comp_map:
+        no_colon_re = re.compile(
+            r'^([A-Z]+\d+)\s+([A-Za-z0-9_\(\)\.\-].*?)'
+            r'(?:\s*,\s*LCSC\s+(C\d{5,8}))?(?:\s*,\s*(.+))?$',
+            re.IGNORECASE | re.MULTILINE,
+        )
+        for m in no_colon_re.finditer(content):
+            des = m.group(1).upper()
+            val = m.group(2).strip()
+            lcsc = m.group(3)
+            extra = (m.group(4) or '').strip()
+            # Skip if the "designator" looks like an LCSC number
+            if re.match(r'^C\d{5,8}$', des, re.IGNORECASE):
+                continue
+            if des not in comp_map:
+                comp_map[des] = {
+                    'designator': des,
+                    'value': val,
+                    'lcsc': lcsc,
+                    'extra': extra,
+                    'pins': {},
+                    'pin_count': detect_pins(val, extra),
+                }
+
+    if not comp_map:
+        return []
+
+    # ── 2. Build line-to-component map ──
+    lines = content.split('\n')
+    line_to_comp: dict[int, str] = {}
+    current_comp: str | None = None
+    for i, line in enumerate(lines):
+        m = comp_line_re.match(line.strip())
+        if m:
+            current_comp = m.group(1).upper()
+        if current_comp and current_comp in comp_map:
+            line_to_comp[i] = current_comp
+
+    # ── 3. Parse explicit pin assignment lines ──
+    for m in pin_line_re.finditer(content):
+        line_idx = content[:m.start()].count('\n')
+        comp = line_to_comp.get(line_idx)
+        if comp and comp in comp_map:
+            pin_num = int(m.group(1))
+            pin_name = m.group(2)
+            signal = m.group(3)
+            comp_map[comp]['pins'][pin_num] = {
+                'name': pin_name or default_pin_name(comp, pin_num, comp_map[comp]['pin_count']),
+                'signal': signal,
+            }
+
+    # ── 4. Parse arrow connection chains ──
+    chains: list[list[str]] = []
+    for line in lines:
+        line = line.strip()
+        if '→' not in line:
             continue
-        seen.add(designator)
+        if re.match(r'^pin\s+\d', line, re.IGNORECASE):
+            continue  # explicit pin lines already handled
+        clean = re.sub(r'^Connect:\s*', '', line, flags=re.IGNORECASE)
+        parts = [p.strip() for p in re.split(r'\s*→\s*', clean) if p.strip()]
+        if len(parts) >= 2:
+            chains.append(parts)
 
+    # ── 5. Process chains with bidirectional signal propagation ──
+    chain_assignments: list[tuple[str, str, str]] = []  # (comp, pin_hint, signal)
+
+    for chain in chains:
+        # Classify items
+        items: list[tuple[str, str, str | None]] = []  # (type, value, hint)
+        for item in chain:
+            cm = re.match(r'^([A-Z]+\d+)(?:\s+(\w+))?$', item, re.IGNORECASE)
+            if cm:
+                items.append(('comp', cm.group(1).upper(), (cm.group(2) or '').lower()))
+            else:
+                items.append(('signal', item, None))
+
+        signal_positions = [i for i, (t, _, _) in enumerate(items) if t == 'signal']
+        comp_positions = [i for i, (t, _, _) in enumerate(items) if t == 'comp']
+
+        if not signal_positions or not comp_positions:
+            continue
+
+        for ci in comp_positions:
+            cname = items[ci][1]
+            hint = items[ci][2] or ''
+            nearest_sig = None
+            nearest_dist = float('inf')
+            for si in signal_positions:
+                dist = abs(si - ci)
+                if dist < nearest_dist and dist > 0:
+                    nearest_dist = dist
+                    nearest_sig = items[si][1]
+            if nearest_sig and cname in comp_map:
+                chain_assignments.append((cname, hint, nearest_sig))
+
+    # Apply chain assignments
+    for cname, hint, signal in chain_assignments:
+        pins = comp_map[cname]['pins']
+        pcount = comp_map[cname]['pin_count']
+
+        def _assign(pin_num: int, sig: str) -> None:
+            if pin_num not in pins:
+                pins[pin_num] = {
+                    'name': default_pin_name(cname, pin_num, pcount),
+                    'signal': sig,
+                }
+            elif not pins[pin_num].get('signal') or pins[pin_num]['signal'] == 'NC':
+                pins[pin_num]['signal'] = sig
+
+        if hint:
+            found = False
+            for pn, pdata in pins.items():
+                if pdata.get('name', '').lower() == hint:
+                    pdata['signal'] = signal
+                    found = True
+                    break
+            if not found:
+                for pn in range(1, pcount + 1):
+                    if pn not in pins:
+                        pins[pn] = {'name': hint.capitalize(), 'signal': signal}
+                        break
+        else:
+            for pn in range(1, pcount + 1):
+                if pn not in pins or not pins[pn].get('signal') or pins[pn]['signal'] == 'NC':
+                    _assign(pn, signal)
+                    break
+
+    # ── 6. Fill missing pins with NC ──
+    for comp in comp_map.values():
+        for pn in range(1, comp['pin_count'] + 1):
+            if pn not in comp['pins']:
+                comp['pins'][pn] = {
+                    'name': default_pin_name(comp['designator'], pn, comp['pin_count']),
+                    'signal': 'NC',
+                }
+
+    # ── 7. Build BaseComponent list ──
+    components: list[BaseComponent] = []
+    for c in comp_map.values():
         pins = [
-            Pin(pin_number=i + 1, name=f"PIN{i + 1}", signal_name="NC")
-            for i in range(max(pin_count, 2))
+            PinCls(pin_number=pn, name=pd['name'], signal_name=pd['signal'])
+            for pn, pd in sorted(c['pins'].items())
         ]
+        # Build search_query: use LCSC if available, else the value
+        search_query = c['lcsc'] if c['lcsc'] else c['value']
         components.append(BaseComponent(
-            designator=designator,
-            value=value,
-            block_name="UserDefined",
-            search_query=lcsc,
+            designator=c['designator'],
+            value=c['value'],
+            block_name='UserDefined',
+            search_query=search_query,
             part_uuid=None,
             pins=pins,
         ))
-
-    # --- Strategy 2: loose line scan (non-table formats) ---
-    if not components:
-        line_re = re.compile(
-            r'([A-Z]{1,3}\d+)\s+'
-            r'([A-Za-z0-9_\-\.]+)'
-            r'.{0,80}'
-            r'(C\d{5,8})',
-            re.IGNORECASE,
-        )
-        for m in line_re.finditer(content):
-            designator = m.group(1).strip().upper()
-            value      = m.group(2).strip()
-            lcsc       = m.group(3).strip()
-
-            if designator in seen:
-                continue
-            seen.add(designator)
-
-            components.append(BaseComponent(
-                designator=designator,
-                value=value,
-                block_name="UserDefined",
-                search_query=lcsc,
-                part_uuid=None,
-                pins=[
-                    Pin(pin_number=1, name="PIN1", signal_name="NC"),
-                    Pin(pin_number=2, name="PIN2", signal_name="NC"),
-                ],
-            ))
 
     return components
 

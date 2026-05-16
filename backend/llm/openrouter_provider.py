@@ -84,15 +84,19 @@ class OpenRouterProvider(LLMProvider):
     ) -> AsyncIterator[str]:
         resolved_model = self._resolve_model(model)
         try:
-            async with self.client.chat.completions.stream(
+            # Use create(stream=True) — compatible with all openai SDK v1.x versions.
+            # .text_stream does not exist on AsyncChatCompletionStream in openai<1.12.
+            stream = await self.client.chat.completions.create(
                 model=resolved_model,
                 messages=self._to_messages(messages),
                 temperature=temperature,
                 max_tokens=max_tokens,
-            ) as stream_ctx:
-                async for text in stream_ctx.text_stream:
-                    if text:
-                        yield text
+                stream=True,
+            )
+            async for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    yield delta
         except Exception as e:
             logger.error(f"OpenRouter stream error: {e}")
             raise

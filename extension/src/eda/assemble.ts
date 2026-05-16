@@ -257,10 +257,14 @@ const findPin = async (designator: string, pin_: { num: number | string, name?: 
 async function drawEdges(edges: CircuitAssembly['edges'], components: CircuitAssembly['components'],
     placeComponents: PlacedComponents, offset: Offset = { x: 0, y: 0 }) {
     const pointToArr = (p: { x: number, y: number }) => {
-        // applyOffset converts layout coords → EasyEDA coords (same Y convention
-        // as getState_Y / eda.sch_PrimitiveWire.create); do NOT negate y.
+        // FIX v2.3.6: empirical proof from the failing wire toast
+        //   [780,-1110, 1005,-1110, 1005,990, 1005,690, 1175,690, 1175,-650]
+        // shows pin.getState_Y() returns NEGATIVE Y in EasyEDA's stored
+        // coordinate system, while applyOffset returns POSITIVE Y. To make
+        // bend points share the pin sign convention (required by
+        // sch_PrimitiveWire.create), negate the y from applyOffset.
         const { x, y } = applyOffset(p.x, p.y, offset);
-        return [x, y];
+        return [x, -y];
     }
 
     const searchSignalName = (designator: string, pin: string | number) => {
@@ -488,13 +492,16 @@ async function placeNet(nets: AddedNet[], placeComponents: PlacedComponents, mak
 
         if (wireCreated && makePortForThis && endX && endYPort && dir) {
             const rotation = dir.dy === 1 ? 180 : 0;
-            // FIX v2.3.5: removed `-endYPort` negation. EasyEDA Pro's
-            // sch_PrimitiveComponent.create() and pin.getState_Y() both use
-            // Y positive-down (screen convention). The historical negation
-            // was a "two wrongs cancel" leftover that, with the v2.3.3
-            // pointToArr fix, now places NET_PORT symbols far below the
-            // canvas — producing extremely long dangling vertical wires.
-            const comp = await placeComponent(NET_PORT_COMPONENT, { x: endX, y: endYPort, rotate: rotation }).catch(e => undefined);
+            // FIX v2.3.6: restore the historical `-endYPort` negation.
+            // The empirical wire-error coords proved pin.getState_Y() is
+            // NEGATIVE while sch_PrimitiveComponent.create() expects the
+            // unflipped (positive) value. Negating endYPort (which is in
+            // pin-space, i.e. negative) yields the positive value that
+            // create() flips back to the pin location. v2.3.5 wrongly
+            // removed this and the NET_PORT symbols ended up off-canvas
+            // at +Y, which only *appeared* to be a fix because they were
+            // invisible.
+            const comp = await placeComponent(NET_PORT_COMPONENT, { x: endX, y: -endYPort, rotate: rotation }).catch(e => undefined);
 
             if (comp) {
                 comp.setState_Name(net.net);

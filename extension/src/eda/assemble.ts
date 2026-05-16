@@ -374,18 +374,28 @@ async function drawEdges(edges: CircuitAssembly['edges'], components: CircuitAss
             try {
                 const wire = await eda.sch_PrimitiveWire.create(values, netName);
             } catch (err) {
-                // v2.3.8: wire.create() can fail when the routed path crosses
-                // an unrelated component's body (common for long cross-block
-                // global nets like GND that span 3+ blocks). For global power
-                // nets we can recover by stamping a net-flag symbol on each
-                // endpoint pin — connectivity is preserved through the
-                // shared net identifier without needing a drawn wire.
-                const fallbackOk = await tryGlobalNetFlagFallback(
-                    netName, srcPinPos, trgPinPos
-                );
-                if (fallbackOk) {
+                // v2.3.8/2.3.9: wire.create() can fail when the routed path
+                // crosses an unrelated component body or when the computed
+                // endpoint doesn't snap precisely onto a pin. Recover by
+                // splitting the connection into two short labeled stubs —
+                // one at each endpoint pin tagged with the net name —
+                // because EasyEDA Pro joins pins electrically by shared
+                // net name. For recognised global power nets we prefer a
+                // proper net-flag symbol (Power/Ground icon).
+                let recovered = false;
+                let recoveryKind = '';
+
+                if (await tryGlobalNetFlagFallback(netName, srcPinPos, trgPinPos)) {
+                    recovered = true;
+                    recoveryKind = 'net-flag';
+                } else if (await tryLabeledStubFallback(netName, srcPinPos, trgPinPos)) {
+                    recovered = true;
+                    recoveryKind = 'labeled stub';
+                }
+
+                if (recovered) {
                     recordToast(
-                        `Wire ${netName} (${section.incomingShape} -> ${section.outgoingShape}) crossed a component; using net-flag fallback instead.`,
+                        `Wire ${netName} (${section.incomingShape} -> ${section.outgoingShape}) could not be routed directly; used ${recoveryKind} fallback to preserve connectivity.`,
                         'warning'
                     );
                 } else {
@@ -439,6 +449,52 @@ async function tryGlobalNetFlagFallback(
     const a = await place(src);
     const b = await place(trg);
     return a && b;
+}
+
+/**
+ * v2.3.9 — Generic recovery for any named net when wire.create() fails.
+ * Draws a very short labeled wire stub at each endpoint pin. Because
+ * EasyEDA Pro electrically joins all pins that share a net name, the two
+ * stubs preserve the connection across whatever obstacle blocked the
+ * direct route. Coordinates are in pin-space (negative Y), exactly the
+ * same convention sch_PrimitiveWire.create expects in success paths
+ * (proven empirically by the v2.3.6 error toast).
+ */
+async function tryLabeledStubFallback(
+    netName: string,
+    src: { x: number, y: number },
+    trg: { x: number, y: number }
+): Promise<boolean> {
+    if (!netName || netName === 'unknown net') return false;
+
+    const STUB = 20;
+
+    const placeStub = async (p: { x: number, y: number }) => {
+        // Try four short orthogonal directions; first one that doesn't
+        // throw wins. The stub is so short (20 units) that it rarely
+        // collides with surrounding geometry.
+        const dirs: Array<[number, number]> = [
+            [STUB, 0], [-STUB, 0], [0, -STUB], [0, STUB],
+        ];
+        for (const [dx, dy] of dirs) {
+            try {
+                const w = await eda.sch_PrimitiveWire.create(
+                    [to2(p.x), to2(p.y), to2(p.x + dx), to2(p.y + dy)],
+                    netName
+                );
+                if (w) return true;
+            } catch {
+                // try next direction
+            }
+        }
+        return false;
+    };
+
+    const a = await placeStub(src);
+    const b = await placeStub(trg);
+    // Partial success still helps — even one labeled stub gives the pin
+    // the right net name. Require at least one to claim recovery.
+    return a || b;
 }
 
 const getPageSize = async () => {

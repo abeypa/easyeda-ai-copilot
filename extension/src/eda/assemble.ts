@@ -81,14 +81,13 @@ function withTimeout<T>(
 }
 
 const placeComponent = async (data: { libraryUuid: string, uuid: string }, { x, y, rotate }: { x: number, y: number, rotate?: number }) => {
-    let maybeLibUuid;
-
-    if (isOffline) {
-        maybeLibUuid = [...new Set([data.libraryUuid, '0819f05c4eef4c71ace90d822a990e87', 'f5af0881d090439f925343ec8aedf154'])];
-    }
-    else {
-        maybeLibUuid = [data.libraryUuid];
-    }
+    // Always try multiple library UUIDs — in online mode the string 'lcsc' is
+    // not a real UUID so we must also probe the known LCSC library UUIDs.
+    const maybeLibUuid = [...new Set([
+        data.libraryUuid,
+        '0819f05c4eef4c71ace90d822a990e87',
+        'f5af0881d090439f925343ec8aedf154',
+    ])];
 
     let comp;
 

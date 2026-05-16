@@ -381,8 +381,10 @@ class CircuitLayout:
                     startPoint=ElkPoint(x=sx, y=sy),
                     endPoint=ElkPoint(x=tx, y=ty),
                     bendPoints=bend_points,
-                    incomingShape=source_des,
-                    outgoingShape=target_des,
+                    # Must use "DESIG_pin_NUM" format — assemble.ts splits on "_pin_"
+                    # to find which component pin to connect the wire to.
+                    incomingShape=f"{source_des}_pin_{source_pin.pin_number}",
+                    outgoingShape=f"{target_des}_pin_{target_pin.pin_number}",
                 )
 
                 # Container = the block that contains the source

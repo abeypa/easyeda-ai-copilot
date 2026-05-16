@@ -172,44 +172,44 @@ async function placeGenericSymbol(
     const { x, y } = applyOffset(centerX, centerY, offset);
 
     try {
-        // Draw rectangle body
-        const rect = await eda.sch_PrimitiveShape.create({
-            path: 'M' + [
-                x - GENERIC_SYMBOL_W / 2, y - GENERIC_SYMBOL_H / 2,
-                x + GENERIC_SYMBOL_W / 2, y - GENERIC_SYMBOL_H / 2,
-                x + GENERIC_SYMBOL_W / 2, y + GENERIC_SYMBOL_H / 2,
-                x - GENERIC_SYMBOL_W / 2, y + GENERIC_SYMBOL_H / 2,
-            ].join(' '),
-            fillColor: 'none',
-            strokeColor: '#000000',
-            strokeWidth: 1,
-        });
-
-        // Draw designator text above
-        const desText = await eda.sch_PrimitiveShape.create({
-            type: 'T',
-            x: x,
-            y: y - GENERIC_SYMBOL_H / 2 - 15,
-            text: designator,
-            fontSize: 14,
-            color: '#000000',
-            textAlign: 'center',
-        });
-
-        // Draw value text below
-        const valText = await eda.sch_PrimitiveShape.create({
-            type: 'T',
-            x: x,
-            y: y + GENERIC_SYMBOL_H / 2 + 15,
-            text: value.length > 20 ? value.substring(0, 18) + '..' : value,
-            fontSize: 11,
-            color: '#666666',
-            textAlign: 'center',
-        });
-
-        // Create virtual pin positions based on pin count
-        const pinCount = Math.max(2, pinDefs.length);
+        // v2.4.5 — use the REAL SDK surface. `eda.sch_PrimitiveShape` does
+        // not exist; v2.4.4's calls were silently throwing, dropping any
+        // component that fell through here (J1, D1 in user reports).
+        // Correct APIs (positional args, see @jlceda/pro-api-types):
+        //   sch_PrimitiveRectangle.create(topLeftX, topLeftY, w, h, cornerRadius?, rotation?, color?, fillColor?, lineWidth?)
+        //   sch_PrimitiveText.create(x, y, content, rotation?, textColor?, fontName?, fontSize?, bold?, italic?, underLine?, alignMode?)
+        //
+        // EasyEDA stores Y as positive-down internally; the (x, y) passed
+        // here comes from applyOffset and is already in that convention,
+        // matching how createComponet places real components.
+        const halfW = GENERIC_SYMBOL_W / 2;
         const halfH = GENERIC_SYMBOL_H / 2;
+
+        const rect = await eda.sch_PrimitiveRectangle.create(
+            x - halfW, y - halfH,
+            GENERIC_SYMBOL_W, GENERIC_SYMBOL_H,
+            0, 0
+        );
+
+        // Designator above the box (alignMode 1 = top-center)
+        await eda.sch_PrimitiveText.create(
+            x, y - halfH - 12, designator,
+            0, null, null, 10, true, false, false, 1
+        );
+
+        // Value below the box (truncated for long strings, alignMode 1 = top-center)
+        const valShort = value.length > 24 ? value.substring(0, 22) + '..' : value;
+        await eda.sch_PrimitiveText.create(
+            x, y + halfH + 2, valShort,
+            0, null, null, 8, false, false, false, 1
+        );
+
+        // Build virtual pins distributed along left/right edges so wires
+        // can target them later. drawEdges only ever calls getState_X/Y/
+        // PinNumber/PinName on these, so duck-typed objects are fine.
+        const pinCount = Math.max(2, pinDefs.length);
+        const pinsPerSide = Math.ceil(pinCount / 2);
+        const spacing = Math.min(GENERIC_PIN_SPACING, GENERIC_SYMBOL_H / (pinsPerSide + 1));
         const virtualPins: Array<{
             getState_PinNumber(): number;
             getState_PinName(): string;
@@ -217,23 +217,21 @@ async function placeGenericSymbol(
             getState_Y(): number;
         }> = [];
 
-        // Distribute pins along left and right edges
-        const pinsPerSide = Math.ceil(pinCount / 2);
-        const spacing = Math.min(GENERIC_PIN_SPACING, GENERIC_SYMBOL_H / (pinsPerSide + 1));
-
         for (let i = 0; i < pinCount; i++) {
             const pinDef = pinDefs[i] || { pin_number: i + 1, name: String(i + 1) };
             const isLeft = i < pinsPerSide;
             const sideIndex = isLeft ? i : i - pinsPerSide;
             const pinY = y - halfH + (sideIndex + 1) * spacing;
-            const pinX = isLeft ? x - GENERIC_SYMBOL_W / 2 : x + GENERIC_SYMBOL_W / 2;
+            const pinX = isLeft ? x - halfW : x + halfW;
 
-            // Draw small pin dot
-            await eda.sch_PrimitiveShape.create({
-                path: `M ${pinX - 3} ${pinY - 3} L ${pinX + 3} ${pinY - 3} L ${pinX + 3} ${pinY + 3} L ${pinX - 3} ${pinY + 3} Z`,
-                fillColor: '#000000',
-                strokeWidth: 0,
-            });
+            // Optional pin tick — short line from edge outward (3 units)
+            // Helps visually identify pin positions on the generic body.
+            try {
+                await eda.sch_PrimitiveRectangle.create(
+                    pinX - (isLeft ? 3 : 0), pinY - 1, 3, 2,
+                    0, 0, '#000000', '#000000', 1
+                );
+            } catch { /* tick is cosmetic, ignore failures */ }
 
             virtualPins.push({
                 getState_PinNumber: () => Number(pinDef.pin_number),
@@ -243,8 +241,12 @@ async function placeGenericSymbol(
             });
         }
 
+        // primitive_id is used by findPin -> sch_PrimitiveComponent.get(...);
+        // a rectangle is NOT a component, so that lookup will fail. We mark
+        // the id with a `__generic__:` prefix so findPin can detect and skip
+        // the .get() call (see fix below).
         return {
-            primitive_id: rect?.getState_PrimitiveId?.() || `${designator}_generic`,
+            primitive_id: `__generic__:${designator}`,
             pins: virtualPins as ISCH_PrimitiveComponentPin[],
             designator,
         };
@@ -391,7 +393,21 @@ const findPin = async (designator: string, pin_: { num: number | string, name?: 
     let component: ISCH_PrimitiveComponent | ISCH_PrimitiveComponent_2 | undefined;
 
     if (placeComponents[designator]?.pins) {
-        component = await eda.sch_PrimitiveComponent.get(placeComponents[designator].primitive_id);
+        const pid = placeComponents[designator].primitive_id;
+        // v2.4.5: generic-symbol entries (placed via placeGenericSymbol)
+        // carry a synthetic primitive_id starting with `__generic__:` — they
+        // are NOT real sch_PrimitiveComponent instances, so calling .get()
+        // throws and propagates up through drawEdges, killing every wire in
+        // the loop. Skip the lookup for generic entries; the duck-typed
+        // pins we stored work fine for getState_X/Y/PinNumber/PinName.
+        if (!pid.startsWith('__generic__:')) {
+            try {
+                component = await eda.sch_PrimitiveComponent.get(pid);
+            } catch {
+                // Treat as external if get fails for any reason
+                component = undefined;
+            }
+        }
         pins = placeComponents[designator].pins;
     }
     else if (useSchComps) {
@@ -787,6 +803,31 @@ async function placeNet(nets: AddedNet[], placeComponents: PlacedComponents, mak
         }
 
         if (!wireCreated) {
+            // v2.4.5: stub wire couldn't be drawn in any of the 4 directions —
+            // drop a NET_FLAG (Ground for GND-family, Power for everything
+            // else) right on the pin itself so the connection is still
+            // preserved by shared net name. Without this, added_net entries
+            // for nets like CAN_H/CAN_L silently vanished from the schematic.
+            const upper = (net.net || '').toUpperCase();
+            const isGround = upper === 'GND' || upper === 'AGND' || upper === 'DGND' || upper === 'PGND';
+            const identification: 'Ground' | 'Power' = isGround ? 'Ground' : 'Power';
+            let flagOk = false;
+            try {
+                const flag = await eda.sch_PrimitiveComponent.createNetFlag(
+                    identification, net.net, to2(pinX), to2(-pinY)
+                );
+                flagOk = !!flag;
+            } catch { /* fall through to error toast */ }
+
+            if (flagOk) {
+                recordToast(
+                    `Net flag placed on ${net.designator}.${net.pin_number} for "${net.net}" (stub wire not possible).`,
+                    'warning',
+                    net.designator
+                );
+                continue; // skip the error toast below
+            }
+
             recordToast(
                 `Wire creation failed after all attempts: "${net.net}" at ${net.designator} ${net.pin_number}`,
                 'error',

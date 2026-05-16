@@ -1,6 +1,8 @@
 node_modules/
 *.zip
 *.crx
-dist/
-build/
+*.eext
 .env
+# Ignore root-level build artifacts only (not extension/dist or extension/iframe)
+/dist/
+/build/

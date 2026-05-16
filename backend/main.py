@@ -511,6 +511,69 @@ def _parse_structured_components_v2(content: str) -> List["BaseComponent"]:
     return components
 
 
+async def _resolve_structured_component_uuids(
+    components: list[BaseComponent],
+) -> int:
+    """
+    Resolve LCSC part UUIDs server-side via jlcsearch.tscircuit.com.
+
+    Strategy (most reliable → least):
+    1. If search_query contains an LCSC C-number → deterministic UUID via MD5.
+    2. Call find_best_match() on jlcsearch for the search_query.
+    3. If no match → generate a deterministic UUID from the designator as fallback.
+
+    Sets both part_uuid and _libraryUuid on each component so the frontend's
+    resolveComponentUuids() skips local EasyEDA search entirely.
+
+    Returns the number of successfully resolved components.
+    """
+    from lcsc.search import find_best_match, lcsc_number_to_part_uuid
+
+    LCSC_RE = re.compile(r'\bC\d{5,8}\b')
+    resolved_count = 0
+
+    for comp in components:
+        # Skip already resolved
+        if comp.part_uuid and len(comp.part_uuid) == 32:
+            resolved_count += 1
+            continue
+
+        c_numbers = LCSC_RE.findall(comp.search_query or '')
+
+        if c_numbers:
+            # Direct C-number → deterministic UUID
+            c_num = c_numbers[0].upper()
+            comp.part_uuid = lcsc_number_to_part_uuid(c_num)
+            comp._libraryUuid = 'lcsc'  # type: ignore[attr-defined]
+            resolved_count += 1
+            logger.debug(f"Resolved {comp.designator}: C-number {c_num} → UUID")
+            continue
+
+        # Try jlcsearch lookup
+        try:
+            result = await asyncio.wait_for(
+                find_best_match(comp.search_query or comp.value),
+                timeout=3.0,
+            )
+            if result:
+                comp.part_uuid = result['part_uuid']
+                comp._libraryUuid = 'lcsc'  # type: ignore[attr-defined]
+                resolved_count += 1
+                logger.debug(f"Resolved {comp.designator}: jlcsearch → {result['lcsc_number']}")
+                continue
+        except Exception:
+            pass
+
+        # Fallback: deterministic UUID from designator+value
+        # This won't match a real symbol, but the frontend will try generic fallback
+        fallback_key = f"{comp.designator}_{comp.value[:20]}"
+        comp.part_uuid = lcsc_number_to_part_uuid(fallback_key)
+        comp._libraryUuid = 'lcsc'  # type: ignore[attr-defined]
+        logger.debug(f"Resolved {comp.designator}: fallback UUID (no LCSC match)")
+
+    return resolved_count
+
+
 def detect_intent(messages: List[ChatMessage]) -> str:
     """
     Detect user intent from the last human message.
@@ -1037,9 +1100,24 @@ async def run_structured_circuit_pipeline(
             components=components,
         )
 
-    # Note: LCSC UUID resolution happens client-side via resolveComponentUuids()
-    update_todo(2, "completed")
-    state.put_event("mes_chunk", "LCSC UUIDs will be resolved in EasyEDA (by C-number).\n\n")
+    # ── Resolve LCSC UUIDs server-side via jlcsearch ─────────────────────────
+    if state.stopped:
+        return
+
+    update_todo(2, "in_progress")
+    state.put_event("status", "Resolving LCSC part UUIDs (server-side)...")
+
+    try:
+        resolved_count = await _resolve_structured_component_uuids(circuit.components)
+        state.put_event(
+            "mes_chunk",
+            f"**Resolved {resolved_count}/{len(circuit.components)} LCSC UUIDs** via jlcsearch\n\n",
+        )
+        update_todo(2, "completed")
+    except Exception as e:
+        logger.warning(f"Server-side LCSC resolution failed: {e}")
+        state.put_event("mes_chunk", f"⚠ LCSC resolution failed: {e}\n\n")
+        update_todo(2, "error")
 
     # ── ELK Layout ────────────────────────────────────────────────────────────
     if state.stopped:

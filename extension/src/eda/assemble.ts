@@ -144,6 +144,116 @@ const placeComponent = async (data: { libraryUuid: string, uuid: string }, { x, 
     return comp as ISCH_PrimitiveComponent | ISCH_PrimitiveComponent_2;
 };
 
+// ── v2.4.4: Generic rectangle fallback when real symbol not found ──────────
+
+const GENERIC_PIN_SPACING = 40;   // grid units between pins
+const GENERIC_SYMBOL_W = 120;     // rectangle width
+const GENERIC_SYMBOL_H = 80;      // rectangle height
+
+interface GenericPin {
+    pin_number: number;
+    name: string;
+    x: number;
+    y: number;
+}
+
+async function placeGenericSymbol(
+    component: CircuitAssembly['components'][0],
+    offset: Offset = { x: 0, y: 0 },
+): Promise<{ primitive_id: string; pins: ISCH_PrimitiveComponentPin[]; designator: string } | undefined> {
+    // v2.4.4: When LCSC lookup fails, draw a generic rectangle symbol with
+    // the designator and value as text labels. Creates virtual pin positions
+    // so wires can still be routed to the correct locations.
+    const { designator, value, pos, pins: pinDefs } = component;
+    if (!pos) return undefined;
+
+    const centerX = pos.center?.x ?? (pos.x + pos.width / 2);
+    const centerY = pos.center?.y ?? (pos.y + pos.height / 2);
+    const { x, y } = applyOffset(centerX, centerY, offset);
+
+    try {
+        // Draw rectangle body
+        const rect = await eda.sch_PrimitiveShape.create({
+            path: 'M' + [
+                x - GENERIC_SYMBOL_W / 2, y - GENERIC_SYMBOL_H / 2,
+                x + GENERIC_SYMBOL_W / 2, y - GENERIC_SYMBOL_H / 2,
+                x + GENERIC_SYMBOL_W / 2, y + GENERIC_SYMBOL_H / 2,
+                x - GENERIC_SYMBOL_W / 2, y + GENERIC_SYMBOL_H / 2,
+            ].join(' '),
+            fillColor: 'none',
+            strokeColor: '#000000',
+            strokeWidth: 1,
+        });
+
+        // Draw designator text above
+        const desText = await eda.sch_PrimitiveShape.create({
+            type: 'T',
+            x: x,
+            y: y - GENERIC_SYMBOL_H / 2 - 15,
+            text: designator,
+            fontSize: 14,
+            color: '#000000',
+            textAlign: 'center',
+        });
+
+        // Draw value text below
+        const valText = await eda.sch_PrimitiveShape.create({
+            type: 'T',
+            x: x,
+            y: y + GENERIC_SYMBOL_H / 2 + 15,
+            text: value.length > 20 ? value.substring(0, 18) + '..' : value,
+            fontSize: 11,
+            color: '#666666',
+            textAlign: 'center',
+        });
+
+        // Create virtual pin positions based on pin count
+        const pinCount = Math.max(2, pinDefs.length);
+        const halfH = GENERIC_SYMBOL_H / 2;
+        const virtualPins: Array<{
+            getState_PinNumber(): number;
+            getState_PinName(): string;
+            getState_X(): number;
+            getState_Y(): number;
+        }> = [];
+
+        // Distribute pins along left and right edges
+        const pinsPerSide = Math.ceil(pinCount / 2);
+        const spacing = Math.min(GENERIC_PIN_SPACING, GENERIC_SYMBOL_H / (pinsPerSide + 1));
+
+        for (let i = 0; i < pinCount; i++) {
+            const pinDef = pinDefs[i] || { pin_number: i + 1, name: String(i + 1) };
+            const isLeft = i < pinsPerSide;
+            const sideIndex = isLeft ? i : i - pinsPerSide;
+            const pinY = y - halfH + (sideIndex + 1) * spacing;
+            const pinX = isLeft ? x - GENERIC_SYMBOL_W / 2 : x + GENERIC_SYMBOL_W / 2;
+
+            // Draw small pin dot
+            await eda.sch_PrimitiveShape.create({
+                path: `M ${pinX - 3} ${pinY - 3} L ${pinX + 3} ${pinY - 3} L ${pinX + 3} ${pinY + 3} L ${pinX - 3} ${pinY + 3} Z`,
+                fillColor: '#000000',
+                strokeWidth: 0,
+            });
+
+            virtualPins.push({
+                getState_PinNumber: () => Number(pinDef.pin_number),
+                getState_PinName: () => pinDef.name || String(pinDef.pin_number),
+                getState_X: () => pinX,
+                getState_Y: () => pinY,
+            });
+        }
+
+        return {
+            primitive_id: rect?.getState_PrimitiveId?.() || `${designator}_generic`,
+            pins: virtualPins as ISCH_PrimitiveComponentPin[],
+            designator,
+        };
+    } catch (err) {
+        console.warn(`[AI Copilot] Generic symbol fallback failed for ${designator}:`, err);
+        return undefined;
+    }
+}
+
 async function createComponet(component: CircuitAssembly['components'][0], offset: Offset = { x: 0, y: 0 }) {
     let comp: ISCH_PrimitiveComponent | ISCH_PrimitiveComponent_2 | undefined;
     const { part_uuid: partUuid, designator, pos } = component;
@@ -196,23 +306,46 @@ async function createComponet(component: CircuitAssembly['components'][0], offse
 async function placeComponents(components: CircuitAssembly['components'], offset: Offset = { x: 0, y: 0 }): Promise<PlacedComponents> {
     const placedComponentsP = components.map(async (component) => {
         const { part_uuid: partUuid, designator } = component;
-        if (!partUuid) return undefined;
 
+        // v2.4.4: Try real symbol first (if we have a UUID)
+        if (partUuid) {
+            try {
+                const placedComponent = await createComponet(component, offset);
+                if (placedComponent) {
+                    const primitiveId = placedComponent.getState_PrimitiveId();
+                    const pins = await getPrimitiveComponentPins(primitiveId);
+                    await placedComponent.done();
+                    return { primitive_id: primitiveId, pins, designator };
+                }
+            } catch (err) {
+                const eMes = (err instanceof Error) ? err.message : '';
+                console.warn(
+                    `[AI Copilot] Real symbol failed for ${designator}: ${eMes}. ` +
+                    `Falling back to generic rectangle...`
+                );
+                // Fall through to generic symbol below
+            }
+        }
+
+        // v2.4.4: Generic rectangle fallback — ensures ALL components appear
+        // on the schematic even when LCSC lookup fails. Wires can still route
+        // to virtual pin positions.
         try {
-            const placedComponent = await createComponet(component, offset);
-            if (!placedComponent) return undefined;
-            const primitiveId = placedComponent.getState_PrimitiveId();
-
-            const pins = await getPrimitiveComponentPins(primitiveId);
-            await placedComponent.done();
-
-            return { primitive_id: primitiveId, pins, designator };
+            const generic = await placeGenericSymbol(component, offset);
+            if (generic) {
+                recordToast(
+                    `${designator}: placed generic symbol (LCSC not found)`,
+                    'info',
+                    designator,
+                );
+                return generic;
+            }
         } catch (err) {
             const eMes = (err instanceof Error) ? err.message : '';
-
             recordToast(`Component error ${designator}: ${eMes}`, 'error', designator);
-            return undefined;
         }
+
+        return undefined;
     });
 
     const placedComponents = await Promise.all(placedComponentsP);
@@ -221,7 +354,7 @@ async function placeComponents(components: CircuitAssembly['components'], offset
     const total = components.length;
     if (succeeded < total) {
         recordToast(
-            `Placed ${succeeded}/${total} components. ${total - succeeded} could not be found in LCSC.`,
+            `Placed ${succeeded}/${total} components. ${total - succeeded} could not be rendered.`,
             succeeded > 0 ? 'warning' : 'error'
         );
     }

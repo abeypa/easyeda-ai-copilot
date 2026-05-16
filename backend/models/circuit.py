@@ -5,7 +5,7 @@ All structures must match what the frontend (Vue/assembleCircuit) expects.
 
 from __future__ import annotations
 from typing import Any, List, Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +60,10 @@ class CircuitMetadata(BaseModel):
 # ---------------------------------------------------------------------------
 
 class BaseComponent(BaseModel):
+    """Base component model. Allows extra fields (e.g. _libraryUuid) for frontend use."""
+
+    model_config = ConfigDict(extra='allow')
+
     designator: str = Field(..., description="Schematic reference designator, e.g. 'U1', 'R5'")
     value: str = Field(
         ...,

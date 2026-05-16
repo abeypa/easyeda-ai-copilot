@@ -45,15 +45,16 @@ export async function resolveComponentUuids(
         const searchQuery = (comp as any).search_query || '';
         const value = comp.value || '';
 
-        // If we already have a resolved uuid AND libraryUuid, trust it and skip.
-        // A bare 32-char uuid without a libraryUuid is NOT enough — the LLM often
-        // hallucinates uuids, and placeComponent will fail with "Component not
-        // found" for any uuid that doesn't actually exist in the library.
-        // We must verify via eda.lib_Device.search() to obtain the real
-        // libraryUuid (and replace the uuid if it doesn't match a real device).
+        // v2.4.4: If the backend already resolved both uuid AND libraryUuid
+        // (via jlcsearch.tscircuit.com), skip local EasyEDA search entirely.
+        // The backend uses deterministic MD5-based UUIDs from LCSC C-numbers,
+        // which are the same UUIDs EasyEDA uses internally.
         const hasResolvedUuid = comp.part_uuid && comp.part_uuid.length === 32;
         const hasLibUuid = !!(comp as any)._libraryUuid;
-        if (hasResolvedUuid && hasLibUuid) { resolvedCount++; continue; }
+        if (hasResolvedUuid && hasLibUuid) {
+            resolvedCount++;
+            continue;
+        }
 
         // Preserve the LLM-provided uuid as a last-resort fallback.
         const fallbackUuid = hasResolvedUuid ? comp.part_uuid : undefined;

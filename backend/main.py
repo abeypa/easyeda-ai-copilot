@@ -35,6 +35,7 @@ from sse_starlette.sse import EventSourceResponse
 # Local imports
 from models.circuit import (
     BaseComponent,
+    Block,
     ChatMessage,
     ChatRequest,
     CircuitAssembly,
@@ -367,6 +368,45 @@ def extract_user_message(messages: List[ChatMessage]) -> str:
 # SSE helper functions
 # ---------------------------------------------------------------------------
 
+def collapse_to_single_block_if_small(circuit: CircuitStruct, threshold: int = 8) -> CircuitStruct:
+    """
+    v2.4.0 safety net: if the LLM split a small circuit into multiple blocks
+    (e.g. 3 LEDs into PowerInput / CurrentLimit / LED), collapse them all
+    into a single `UserDefined` block before layout. ELK then produces one
+    clean blocks_rect instead of 3 nested boxes that the user has to look at.
+
+    Mirrors the strategy in the architect's CRITICAL BLOCK STRATEGY prompt —
+    this is the deterministic fallback for runs where the LLM ignored the
+    instruction.
+    """
+    if not circuit or not circuit.blocks or len(circuit.components) > threshold or len(circuit.blocks) <= 1:
+        return circuit
+
+    logger.info(
+        f"collapse_to_single_block: merging {len(circuit.blocks)} blocks into 1 "
+        f"(component count {len(circuit.components)} <= {threshold})"
+    )
+
+    merged_block = Block(
+        name="UserDefined",
+        description="User-defined simple circuit",
+        next_block_names=[],
+    )
+
+    # Reassign every component's block_name so layout groups them together.
+    new_components = []
+    for comp in circuit.components:
+        data = comp.model_dump()
+        data["block_name"] = "UserDefined"
+        new_components.append(type(comp)(**data))
+
+    return CircuitStruct(
+        metadata=circuit.metadata,
+        blocks=[merged_block],
+        components=new_components,
+    )
+
+
 def sse_event(event: str, data: str) -> dict:
     return {"event": event, "data": data}
 
@@ -602,6 +642,17 @@ async def run_circuit_pipeline(
     state.put_event("status", "Computing schematic layout...")
     state.put_event("mes_chunk", "Computing schematic layout...\n\n")
 
+    # v2.4.0 safety net: collapse to one block for small circuits even if
+    # the architect ignored the CRITICAL BLOCK STRATEGY prompt.
+    pre_collapse_block_count = len(circuit.blocks) if circuit.blocks else 0
+    circuit = collapse_to_single_block_if_small(circuit)
+    if circuit.blocks and len(circuit.blocks) == 1 and pre_collapse_block_count > 1:
+        state.put_event(
+            "mes_chunk",
+            f"**Merged {pre_collapse_block_count} blocks into 1** "
+            f"(small circuit — collapsed for a cleaner schematic)\n\n"
+        )
+
     try:
         assembly = layout_circuit(circuit)
         update_todo(5, "completed")
@@ -775,6 +826,18 @@ async def run_structured_circuit_pipeline(
     update_todo(3, "in_progress")
     state.put_event("status", "Computing schematic layout...")
     state.put_event("mes_chunk", "Computing schematic layout...\n\n")
+
+    # v2.4.0 safety net: collapse to one block for small explicit-component
+    # lists (structured pipeline most often gets exactly this — 3-8 named
+    # parts that don't need a multi-block diagram).
+    pre_collapse_block_count_s = len(circuit.blocks) if circuit.blocks else 0
+    circuit = collapse_to_single_block_if_small(circuit)
+    if circuit.blocks and len(circuit.blocks) == 1 and pre_collapse_block_count_s > 1:
+        state.put_event(
+            "mes_chunk",
+            f"**Merged {pre_collapse_block_count_s} blocks into 1** "
+            f"(small circuit — collapsed for a cleaner schematic)\n\n"
+        )
 
     try:
         assembly = layout_circuit(circuit)
@@ -1128,6 +1191,7 @@ async def chat_start(request: Request):
                     llm_settings.get_model_for_agent("circuit-maker"))
 
                 TASKS[operation_id]["intermediateResult"] = {"action": "Computing layout..."}
+                circuit = collapse_to_single_block_if_small(circuit)
                 assembly = layout_circuit(circuit)
 
                 result_content = make_circuit_result_message(assembly, errors)
@@ -1213,6 +1277,7 @@ async def chat_direct(request: Request):
                 llm_settings.get_model_for_agent("circuit-maker"))
             circuit, errors = await run_circuit_designer(blocks, components, provider,
                 llm_settings.get_model_for_agent("circuit-maker"))
+            circuit = collapse_to_single_block_if_small(circuit)
             assembly = layout_circuit(circuit)
             result_content = make_circuit_result_message(assembly, errors)
             return JSONResponse({

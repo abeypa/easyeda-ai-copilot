@@ -59,8 +59,11 @@ Return ONLY valid JSON matching this exact schema:
    - Include protection components (TVS, fuses) in the relevant block
    - Include any required pull-up/pull-down resistors in the connected IC block
 
-4. **Granularity**: Aim for 3-8 blocks. Don't over-segment simple circuits.
-   - Simple LED blinker: 2 blocks (MCU + LED Driver)
+4. **Granularity** — CRITICAL BLOCK STRATEGY:
+   - If the user describes a SIMPLE / TEST / BASIC circuit, OR the circuit will have **8 or fewer components total**, output EXACTLY ONE block named `UserDefined` containing every component. Do NOT split a 3-component LED test into PowerInput / CurrentLimit / LED — collapse it into one block.
+   - Keywords that ALWAYS force a single `UserDefined` block: "simple", "test", "basic", "demo", "minimal", "smoke test", "sanity check", "blink test", "LED test".
+   - For larger circuits, aim for 3-8 blocks. Don't over-segment.
+   - Simple LED blinker (≤8 parts): 1 block (UserDefined)
    - Audio amplifier: 4-5 blocks (Power, Input Filter, Preamp, Output Stage, Speaker Protection)
    - IoT device: 5-7 blocks (Power, MCU, Sensor, Communication, Display, Battery Monitor)
 

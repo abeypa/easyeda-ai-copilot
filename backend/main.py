@@ -515,25 +515,36 @@ async def _resolve_structured_component_uuids(
     components: list[BaseComponent],
 ) -> int:
     """
-    Resolve LCSC part UUIDs server-side via jlcsearch.tscircuit.com.
+    Pre-resolution stage: normalise search_query so the FRONTEND's
+    eda.lib_Device.search() can find a REAL EasyEDA library UUID.
 
-    Strategy (most reliable → least):
-    1. If search_query contains an LCSC C-number → deterministic UUID via MD5.
-    2. Call find_best_match() on jlcsearch for the search_query.
-    3. If no match → generate a deterministic UUID from the designator as fallback.
+    HARD LESSON (v2.4.8): older revisions of this function fabricated
+    MD5-based "deterministic" part_uuids and put them on the component
+    along with _libraryUuid='lcsc'. The frontend's resolve-uuids.ts then
+    saw `hasResolvedUuid && hasLibUuid`, skipped the local search, and
+    handed the fake UUID directly to eda.sch_PrimitiveComponent.create().
+    EasyEDA's component server returned 404 for every fake UUID, so the
+    component was dropped from the schematic AND every wire that touched
+    it silently failed — producing the "no wires, J1 missing" bug the
+    user has been hitting for many iterations.
 
-    Sets both part_uuid and _libraryUuid on each component so the frontend's
-    resolveComponentUuids() skips local EasyEDA search entirely.
+    Correct strategy: leave part_uuid=None for anything jlcsearch can't
+    give us a real LCSC UUID for, and FRONT-LOAD the LCSC C-number in
+    search_query (e.g. "C2890438 SMDJ26CA TVS") so the frontend's
+    Strategy-0 extractLcscNumbers() match fires immediately. EasyEDA's
+    local library lookup is always available and returns *real* UUIDs.
 
-    Returns the number of successfully resolved components.
+    The optional jlcsearch lookup is kept for the stock-check path, but
+    its returned UUIDs are NEVER stored on the component — they were
+    never real EasyEDA UUIDs to begin with.
     """
-    from lcsc.search import find_best_match, lcsc_number_to_part_uuid
+    from lcsc.search import find_best_match  # used only for stock metadata
 
     LCSC_RE = re.compile(r'\bC\d{5,8}\b')
     resolved_count = 0
 
     for comp in components:
-        # Skip already resolved
+        # Already resolved by an earlier stage — trust it
         if comp.part_uuid and len(comp.part_uuid) == 32:
             resolved_count += 1
             continue
@@ -541,35 +552,38 @@ async def _resolve_structured_component_uuids(
         c_numbers = LCSC_RE.findall(comp.search_query or '')
 
         if c_numbers:
-            # Direct C-number → deterministic UUID
+            # Surface the C-number at the front of search_query so the
+            # frontend's Strategy-0 LCSC match catches it first try.
             c_num = c_numbers[0].upper()
-            comp.part_uuid = lcsc_number_to_part_uuid(c_num)
-            comp._libraryUuid = 'lcsc'  # type: ignore[attr-defined]
-            resolved_count += 1
-            logger.debug(f"Resolved {comp.designator}: C-number {c_num} → UUID")
-            continue
+            sq = comp.search_query or ''
+            if not sq.lstrip().upper().startswith(c_num):
+                comp.search_query = f"{c_num} {sq.strip()}".strip()
+            logger.debug(f"{comp.designator}: front-loaded LCSC {c_num} for frontend lookup")
+        else:
+            # Optional: try jlcsearch to enrich search_query with a real
+            # LCSC C-number if one exists. We only use the C-number, never
+            # the fabricated part_uuid.
+            try:
+                result = await asyncio.wait_for(
+                    find_best_match(comp.search_query or comp.value),
+                    timeout=3.0,
+                )
+                if result and result.get('lcsc_number'):
+                    lcsc = result['lcsc_number']
+                    comp.search_query = f"{lcsc} {comp.search_query or comp.value}".strip()
+                    logger.debug(f"{comp.designator}: jlcsearch suggested LCSC {lcsc}")
+            except Exception:
+                pass
 
-        # Try jlcsearch lookup
-        try:
-            result = await asyncio.wait_for(
-                find_best_match(comp.search_query or comp.value),
-                timeout=3.0,
-            )
-            if result:
-                comp.part_uuid = result['part_uuid']
-                comp._libraryUuid = 'lcsc'  # type: ignore[attr-defined]
-                resolved_count += 1
-                logger.debug(f"Resolved {comp.designator}: jlcsearch → {result['lcsc_number']}")
-                continue
-        except Exception:
-            pass
-
-        # Fallback: deterministic UUID from designator+value
-        # This won't match a real symbol, but the frontend will try generic fallback
-        fallback_key = f"{comp.designator}_{comp.value[:20]}"
-        comp.part_uuid = lcsc_number_to_part_uuid(fallback_key)
-        comp._libraryUuid = 'lcsc'  # type: ignore[attr-defined]
-        logger.debug(f"Resolved {comp.designator}: fallback UUID (no LCSC match)")
+        # Leave part_uuid=None and _libraryUuid unset on purpose — the
+        # frontend's eda.lib_Device.search() is the only reliable way to
+        # get an EasyEDA-recognised UUID.
+        comp.part_uuid = None
+        if hasattr(comp, '_libraryUuid'):
+            try:
+                delattr(comp, '_libraryUuid')
+            except Exception:
+                pass
 
     return resolved_count
 

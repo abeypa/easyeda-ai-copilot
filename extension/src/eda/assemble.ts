@@ -604,17 +604,28 @@ async function tryGlobalNetFlagFallback(
         upper.startsWith('V') || upper.startsWith('+') || upper.startsWith('-');
     if (!isGround && !isPower) return false;
 
-    const identification: 'Ground' | 'Power' = isGround ? 'Ground' : 'Power';
+    // v2.4.10 — abandon eda.sch_PrimitiveComponent.createNetFlag().
+    // It exists in the SDK type definitions but the EasyEDA server returns
+    // 404 at runtime for arbitrary net names (only the four hardcoded
+    // identifications work, and the uncaught rejection propagates up and
+    // kills subsequent wire drawing). Instead, use the SAME placeComponent
+    // path that createComponet uses for partUuid==='GND' / 'VCC' — those
+    // UUIDs are known-good and render real EasyEDA port symbols.
+    const PORT = isGround
+        ? { libraryUuid: 'f5af0881d090439f925343ec8aedf154', uuid: '181f479f152643bbaa46a4b8cd92ed2e' }
+        : VCC_PORT_COMPONENT;
 
     const place = async (p: { x: number, y: number }) => {
+        // placeComponent expects positive Y in pre-flip space. Pin Y is
+        // already negative (post-flip), so negate to recover input Y.
         try {
-            // createNetFlag y convention matches sch_PrimitiveComponent.create
-            // (positive input → stored as negative). pinY is already negative,
-            // so we negate to recover the positive input value.
-            const flag = await eda.sch_PrimitiveComponent.createNetFlag(
-                identification, netName, to2(p.x), to2(-p.y)
-            );
-            return !!flag;
+            const comp = await placeComponent(PORT, { x: to2(p.x), y: to2(-p.y) });
+            if (!comp) return false;
+            const label = (netName || '').toUpperCase();
+            try { comp.setState_Name(label); } catch { /* non-fatal */ }
+            try { comp.setState_OtherProperty({ "Global Net Name": label }); } catch { /* non-fatal */ }
+            try { await comp.done(); } catch { /* non-fatal */ }
+            return true;
         } catch {
             return false;
         }
@@ -835,13 +846,24 @@ async function placeNet(nets: AddedNet[], placeComponents: PlacedComponents, mak
             // for nets like CAN_H/CAN_L silently vanished from the schematic.
             const upper = (net.net || '').toUpperCase();
             const isGround = upper === 'GND' || upper === 'AGND' || upper === 'DGND' || upper === 'PGND';
-            const identification: 'Ground' | 'Power' = isGround ? 'Ground' : 'Power';
+            // v2.4.10 — use the known-good placeComponent(GND/VCC_PORT_COMPONENT)
+            // path instead of eda.sch_PrimitiveComponent.createNetFlag().
+            // createNetFlag is declared in the SDK .d.ts but the EasyEDA
+            // server returns 404 at runtime for arbitrary net names; the
+            // uncaught rejection blocks subsequent wire drawing.
+            const PORT = isGround
+                ? { libraryUuid: 'f5af0881d090439f925343ec8aedf154', uuid: '181f479f152643bbaa46a4b8cd92ed2e' }
+                : VCC_PORT_COMPONENT;
             let flagOk = false;
             try {
-                const flag = await eda.sch_PrimitiveComponent.createNetFlag(
-                    identification, net.net, to2(pinX), to2(-pinY)
-                );
-                flagOk = !!flag;
+                const flag = await placeComponent(PORT, { x: to2(pinX), y: to2(-pinY) });
+                if (flag) {
+                    const label = (net.net || '').toUpperCase();
+                    try { flag.setState_Name(label); } catch { /* non-fatal */ }
+                    try { flag.setState_OtherProperty({ "Global Net Name": label }); } catch { /* non-fatal */ }
+                    try { await flag.done(); } catch { /* non-fatal */ }
+                    flagOk = true;
+                }
             } catch { /* fall through to error toast */ }
 
             if (flagOk) {

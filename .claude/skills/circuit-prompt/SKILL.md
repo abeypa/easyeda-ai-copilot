@@ -1,11 +1,11 @@
 ---
 name: circuit-prompt
-description: Normalize a natural-language circuit description before sending it to the EasyEDA AI Copilot extension (the local backend at port 5120 / circuit.tech.ru.net). Use ONLY when the user explicitly asks to "prepare", "normalize", "clean up", "lint", or "fix" a circuit prompt for the copilot, OR when they invoke `/circuit-prompt`. Outputs (a) the cleaned prompt ready to paste into the EasyEDA chat panel, and (b) a list of warnings about anything that needed clarification, defaulting, or guessing. Do NOT trigger for: general circuit design questions, schematic review, datasheet questions, component selection advice, debugging the extension itself, or pure conversation about electronics. ONLY for transforming a raw prompt into a copilot-ready prompt.
+description: Normalize a natural-language circuit description before sending it to the EasyEDA AI Copilot extension (the local backend at port 5120 / circuit.tech.ru.net). Use ONLY when the user explicitly asks to "prepare", "normalize", "clean up", "lint", or "fix" a circuit prompt for the copilot, OR when they invoke `/circuit-prompt`. Outputs (a) the cleaned prompt ready to paste into the EasyEDA chat panel, (b) a list of warnings about anything that needed clarification, defaulting, or guessing, and (c) a versioned .md file saved under the project folder. Do NOT trigger for: general circuit design questions, schematic review, datasheet questions, component selection advice, debugging the extension itself, or pure conversation about electronics. ONLY for transforming a raw prompt into a copilot-ready prompt.
 ---
 
 # Circuit-prompt normalizer
 
-You are preparing a user's rough natural-language circuit description so the EasyEDA AI Copilot's LLM pipeline produces a correct schematic instead of hallucinating part numbers and pin counts.
+You are preparing a user's rough natural-language circuit description so the EasyEDA AI Copilot's LLM pipeline produces a correct schematic instead of hallucinating part numbers and pin counts. You also persist every cleaned prompt to disk so revisions are tracked.
 
 ## Why this skill exists
 
@@ -21,11 +21,80 @@ This skill fixes the prompt *before* the LLM sees it. Each rule below maps to a 
 
 ## Workflow when invoked
 
-1. **Read** the user's raw prompt carefully.
-2. **Apply every rule below in order.** For each rule that found a problem, note a one-line warning.
-3. **Output the cleaned prompt** in a single fenced code block, ready to copy-paste.
-4. **Output the warnings list** so the user sees what was guessed.
-5. **Do not invent components** the user didn't mention. If a critical detail is missing and you cannot reasonably default it, list it as a warning and leave a `<<TODO: …>>` placeholder in the cleaned prompt — never silently fabricate.
+1. **Determine the project name.** Extract a short slug from the circuit description (e.g. "power-input-protection", "can-bus-interface"). If the user explicitly names the project with `project:<name>`, use that verbatim. Slugify: lowercase, hyphens for spaces, no special chars.
+2. **Read** the user's raw prompt carefully.
+3. **Apply every normalization rule below in order.** For each rule that found a problem, note a one-line warning.
+4. **Output the cleaned prompt** in a single fenced code block, ready to copy-paste.
+5. **Output the warnings list** so the user sees what was guessed.
+6. **Save the output to disk** using the project persistence rules below. Report the saved file path at the end.
+7. **Do not invent components** the user didn't mention. If a critical detail is missing and you cannot reasonably default it, list it as a warning and leave a `<<TODO: …>>` placeholder in the cleaned prompt — never silently fabricate.
+
+## Project persistence
+
+### Folder structure
+
+```
+<working-directory>/
+└── circuit-projects/
+    └── <project-slug>/
+        ├── v001.md
+        ├── v002.md
+        └── v003.md   ← latest
+```
+
+- **`circuit-projects/`** — root for all saved prompts, always relative to the current working directory.
+- **`<project-slug>/`** — one folder per distinct circuit. Derived from the circuit description title or the explicit `project:<name>` prefix.
+- **`vNNN.md`** — zero-padded 3-digit version, auto-incremented. Scan the folder for existing `v*.md` files and use the next number. First file is always `v001.md`.
+
+### What to save in each vNNN.md
+
+Each file is self-contained — someone reading it cold should understand the full context:
+
+```markdown
+---
+project: <project-slug>
+version: <NNN>
+date: <YYYY-MM-DD>
+raw_prompt_summary: <one-line summary of what the user originally asked>
+---
+
+# <Project Title>  —  v<NNN>
+
+## Raw prompt
+
+> <the user's original text, quoted verbatim>
+
+## Cleaned prompt
+
+```
+<the cleaned prompt, exactly as shown in the chat output>
+```
+
+## Warnings (<N>)
+
+1. <warning #1>
+2. <warning #2>
+
+## Notes
+
+<free-form notes, same as chat output>
+```
+
+### Naming the project slug
+
+| User says | Slug |
+|---|---|
+| `project:can-esd` | `can-esd` |
+| "draw power input section with TVS and Schottky" | `power-input-protection` |
+| "CAN bus interface with ESD and termination" | `can-bus-interface` |
+| "buck converter 12V to 5V" | `buck-12v-5v` |
+| "motor driver H-bridge" | `motor-driver-hbridge` |
+
+If two sessions describe the same circuit (same slug), their files land in the same folder — intentional, so all revisions are co-located.
+
+### When the user says "update" or revises a prompt
+
+Scan the project folder, find the highest existing `vNNN.md`, write `v(N+1).md`. Never overwrite an existing file. This preserves the full revision history.
 
 ## The normalization rules
 
@@ -179,10 +248,16 @@ Use this exact format every time:
 
 ## 📝 Notes (optional)
 
-<any free-form context the user should know — e.g. "Suggested 3 LCSC C-numbers from defaults table; verify on JLCPCB before manufacture">
+<any free-form context the user should know>
+
+## 💾 Saved
+
+`circuit-projects/<project-slug>/v<NNN>.md`
 ```
 
 If there are zero warnings, write `## ✅ No warnings — prompt looks clean.`
+
+After displaying the output, write the file to disk (use the Write tool).
 
 ## Worked example
 
@@ -242,7 +317,13 @@ Y-coordinates for straight horizontal wires where possible.
 
 3 of 6 LCSC numbers came from the defaults table. C2890438 (SMDJ26CA),
 C22452 (SS54), C89632 (10uF 0805) match the user's stated parts directly.
+
+## 💾 Saved
+
+`circuit-projects/power-input-protection/v001.md`
 ````
+
+Then write `circuit-projects/power-input-protection/v001.md` with the full structured content.
 
 ## Reminders
 
@@ -250,3 +331,5 @@ C22452 (SS54), C89632 (10uF 0805) match the user's stated parts directly.
 - **Never silently change** a component count or connection — warn instead.
 - **Never assume** the user wants protection / bypass caps they didn't ask for. Suggest in warnings.
 - **Be terse in the cleaned prompt.** Every word is LLM context-window cost downstream.
+- **Always save to disk.** Every invocation writes a new vNNN.md — never skip the save step.
+- **Never overwrite an existing version file.** Always increment to the next available vNNN.

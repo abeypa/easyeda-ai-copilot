@@ -964,9 +964,39 @@ async function getBBox(components: (ISCH_PrimitiveComponent | ISCH_PrimitiveComp
     };
 }
 
+// v2.4.11 — global unhandled-rejection handler so SDK errors fired from
+// promises we couldn't await (the EasyEDA SDK's internal rpcCall pattern
+// triggers some 404s asynchronously AFTER our try/catch resolves) still
+// land in the chat-panel log instead of silently floating away as
+// "Uncaught (in promise)" console messages.
+let unhandledRejectionHookInstalled = false;
+function installUnhandledRejectionHook() {
+    if (unhandledRejectionHookInstalled) return;
+    unhandledRejectionHookInstalled = true;
+    try {
+        window.addEventListener('unhandledrejection', (ev: any) => {
+            const reason = ev?.reason;
+            let msg = typeof reason === 'string'
+                ? reason
+                : (reason?.message || (reason && JSON.stringify(reason)) || 'unhandled rejection');
+            // Tag with the SDK call URL when present (helps identify which API failed)
+            if (reason?.code === 404 || /\b404\b/.test(String(reason))) {
+                msg = `SDK 404 — likely a UUID/symbol/net-name EasyEDA does not recognise: ${msg}`;
+            }
+            currentErrorLog.push({
+                component: undefined,
+                message: `Unhandled: ${msg}`,
+                severity: 'warning',
+            });
+            try { (window as any).__copilotLastAssemblyErrors = [...currentErrorLog]; } catch {}
+        });
+    } catch { /* non-fatal — environments without window.addEventListener */ }
+}
+
 export async function assembleCircuit(circuit: CircuitAssembly): Promise<AssemblyRuntimeError[]> {
     // v2.3.7: reset the per-run error log; recordToast() will populate it.
     currentErrorLog = [];
+    installUnhandledRejectionHook();
 
     // v2.4.2: read assembly_options for draw_blocks preference
     const drawBlocks = circuit.assembly_options?.draw_blocks ?? true;
@@ -1059,66 +1089,137 @@ export async function assembleCircuit(circuit: CircuitAssembly): Promise<Assembl
     // Easyeda - slowly removes the components
     await new Promise<void>((resolve, reject) => setTimeout(resolve, Math.min((circuit.rm_components?.length ?? 10) * 50, 2000)));
 
-    const placedComp = await placeComponents(circuit.components, offset);
+    // v2.4.11 — PLACE_ONLY_MODE skips every wire / net-port creation path
+    // because the simple L-router produces horrible-looking schematics.
+    // User routes wires manually in EasyEDA after placement. Flip to false
+    // and rebuild if automatic wiring is ever wanted back.
+    const PLACE_ONLY_MODE = true;
 
-    await drawEdges(circuit.edges, circuit.components, placedComp, offset);
-    // v2.4.2: only draw block rectangles when draw_blocks is true.
-    // For simple single-block circuits, disabling this gives a cleaner look.
+    // v2.4.11 — every async step now individually try/catch'd so that ONE
+    // failure (e.g. an SDK 404 buried inside drawEdges) doesn't prevent
+    // the per-component log from being pushed to the chat panel at the
+    // end. Previously a mid-pipeline throw meant runtimeAssemblyErrors
+    // on the iframe side never received anything.
+    let placedComp: PlacedComponents = {};
+    try {
+        placedComp = await placeComponents(circuit.components, offset);
+    } catch (err) {
+        currentErrorLog.push({
+            message: `placeComponents threw: ${(err as Error).message ?? String(err)}`,
+            severity: 'error',
+        });
+    }
+
+    if (!PLACE_ONLY_MODE) {
+        try {
+            await drawEdges(circuit.edges, circuit.components, placedComp, offset);
+        } catch (err) {
+            currentErrorLog.push({
+                message: `drawEdges threw: ${(err as Error).message ?? String(err)}`,
+                severity: 'error',
+            });
+        }
+    } else {
+        currentErrorLog.push({
+            message: `Wires SKIPPED (PLACE_ONLY_MODE) — route with EasyEDA's wire tool.`,
+            severity: 'info',
+        });
+    }
+
     if (drawBlocks) {
-        await drawRect(circuit.blocks_rect, offset);
-    }
-
-    const isUsedPin = (d: string, p: number | string) => {
-        // Hardened v2.3.5: null-safe sections + explicit string coercion so
-        // that pin_number 1 (number) and "1" (string) both compare equal.
-        const l = `${String(d)}_pin_${String(p)}`;
-        return (circuit.edges ?? []).some(e =>
-            (e?.sections ?? []).some(s =>
-                String(s?.incomingShape ?? '') === l ||
-                String(s?.outgoingShape ?? '') === l
-            )
-        );
-    }
-
-    // Build a set of pins already covered by circuit.added_net so we don't
-    // stamp a second wire-stub on the same pin from netForUnusedPins.
-    const addedNetPinSet = new Set(
-        (circuit.added_net ?? []).map(n => `${n.designator}_pin_${n.pin_number}`)
-    );
-
-    const netForUnusedPins: AddedNet[] = [];
-    for (const component of circuit.components) {
-        for (const pin of component.pins) {
-            const pinKey = `${component.designator}_pin_${pin.pin_number}`;
-            if (!isUsedPin(component.designator, pin.pin_number)
-                && !addedNetPinSet.has(pinKey)
-                && pin.signal_name.length) {
-                netForUnusedPins.push({
-                    designator: component.designator,
-                    net: pin.signal_name,
-                    pin_number: pin.pin_number,
-                    pin_name: pin.name
-                });
-            }
+        try { await drawRect(circuit.blocks_rect, offset); }
+        catch (err) {
+            currentErrorLog.push({
+                message: `drawRect threw: ${(err as Error).message ?? String(err)}`,
+                severity: 'warning',
+            });
         }
     }
 
-    await placeNet(circuit.added_net ?? [], placedComp, true, components);
-    await placeNet(netForUnusedPins, placedComp, false, components);
+    if (!PLACE_ONLY_MODE) {
+        const isUsedPin = (d: string, p: number | string) => {
+            // Hardened v2.3.5: null-safe sections + explicit string coercion so
+            // that pin_number 1 (number) and "1" (string) both compare equal.
+            const l = `${String(d)}_pin_${String(p)}`;
+            return (circuit.edges ?? []).some(e =>
+                (e?.sections ?? []).some(s =>
+                    String(s?.incomingShape ?? '') === l ||
+                    String(s?.outgoingShape ?? '') === l
+                )
+            );
+        }
 
-    const errorCount = currentErrorLog.filter(e => e.severity === 'error').length;
-    const warnCount = currentErrorLog.filter(e => e.severity === 'warning').length;
-    if (errorCount || warnCount) {
-        eda.sys_Message.showToastMessage(
-            `Assemble complete with ${errorCount} error(s), ${warnCount} warning(s). See chat panel for details.`,
-            errorCount ? ESYS_ToastMessageType.WARNING : ESYS_ToastMessageType.INFO
+        const addedNetPinSet = new Set(
+            (circuit.added_net ?? []).map(n => `${n.designator}_pin_${n.pin_number}`)
         );
-    } else {
-        eda.sys_Message.showToastMessage(`Assemble complete.`, ESYS_ToastMessageType.SUCCESS);
+
+        const netForUnusedPins: AddedNet[] = [];
+        for (const component of circuit.components) {
+            for (const pin of component.pins) {
+                const pinKey = `${component.designator}_pin_${pin.pin_number}`;
+                if (!isUsedPin(component.designator, pin.pin_number)
+                    && !addedNetPinSet.has(pinKey)
+                    && pin.signal_name.length) {
+                    netForUnusedPins.push({
+                        designator: component.designator,
+                        net: pin.signal_name,
+                        pin_number: pin.pin_number,
+                        pin_name: pin.name
+                    });
+                }
+            }
+        }
+
+        await placeNet(circuit.added_net ?? [], placedComp, true, components);
+        await placeNet(netForUnusedPins, placedComp, false, components);
     }
 
-    // Snapshot the log on `window` as a belt-and-braces persistence channel
-    // for callers that can't await the return value (e.g. raw JSON import).
+    // v2.4.11 — always push a per-component placement summary into the
+    // chat-panel "Assembly Notices" banner so the user can SEE what was
+    // placed, what fell back to the generic rectangle, and what failed,
+    // without having to open dev tools. One info entry per placed
+    // component, one warning per missing one.
+    const requestedDesignators = circuit.components.map(c => c.designator);
+    const placedSet = new Set(Object.keys(placedComp));
+    for (const d of requestedDesignators) {
+        if (!placedSet.has(d)) {
+            currentErrorLog.push({
+                component: d,
+                message: `Not placed (component skipped — see earlier errors)`,
+                severity: 'error',
+            });
+        }
+    }
+    for (const d of placedSet) {
+        const pid = placedComp[d].primitive_id;
+        const isGeneric = typeof pid === 'string' && pid.startsWith('__generic__:');
+        currentErrorLog.push({
+            component: d,
+            message: isGeneric
+                ? `Placed as generic rectangle (LCSC symbol not in local library — verify part).`
+                : `Placed as real LCSC symbol.`,
+            severity: isGeneric ? 'warning' : 'info',
+        });
+    }
+
+    const errorCount = currentErrorLog.filter(e => e.severity === 'error').length;
+    const warnCount  = currentErrorLog.filter(e => e.severity === 'warning').length;
+    const placedReal = currentErrorLog.filter(e => e.severity === 'info' && /Real LCSC symbol/i.test(e.message)).length;
+    const placedGen  = currentErrorLog.filter(e => e.severity === 'warning' && /generic rectangle/i.test(e.message)).length;
+
+    const summary = PLACE_ONLY_MODE
+        ? `Placed ${placedReal + placedGen}/${requestedDesignators.length} components (${placedGen} generic, ${errorCount} failed). Wires SKIPPED — wire manually. See chat panel for per-component log.`
+        : `Assemble complete with ${errorCount} error(s), ${warnCount} warning(s). See chat panel for details.`;
+
+    eda.sys_Message.showToastMessage(
+        summary,
+        errorCount ? ESYS_ToastMessageType.WARNING
+        : warnCount ? ESYS_ToastMessageType.INFO
+        : ESYS_ToastMessageType.SUCCESS
+    );
+
+    // Belt-and-braces persistence: also snapshot to window for callers
+    // that can't await the return value (e.g. raw JSON import path).
     try { (window as any).__copilotLastAssemblyErrors = [...currentErrorLog]; } catch {}
 
     return [...currentErrorLog];

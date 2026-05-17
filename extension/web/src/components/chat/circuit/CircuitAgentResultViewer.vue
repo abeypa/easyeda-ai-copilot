@@ -377,18 +377,36 @@ async function assembleCircuitHandler() {
     showToastMessage('Resolving component UUIDs...', 'info');
     // Resolve missing LCSC UUIDs before assembly
     await resolveComponentUuids(props.result.circuit.components);
-    // v2.3.7: capture runtime errors so they persist in the chat panel
-    // (the AssemblyErrors banner) instead of vanishing with the toast.
-    const runtimeErrors = await assembleCircuit(props.result.circuit);
-    if (runtimeErrors?.length) {
-        runtimeAssemblyErrors.value = runtimeErrors.map(e => ({
-            component: e.component,
-            message: e.message,
-            severity: e.severity,
-        }));
-    } else {
-        runtimeAssemblyErrors.value = [];
+
+    // v2.4.11 — even if assembleCircuit throws partway through (e.g.
+    // an SDK 404 cascades up), pull the partial log from the
+    // window.__copilotLastAssemblyErrors snapshot so the chat-panel
+    // banner ALWAYS shows what happened. Previously a throw meant
+    // runtimeAssemblyErrors stayed empty and the user saw nothing.
+    let runtimeErrors: any[] = [];
+    let thrown: Error | undefined;
+    try {
+        const r = await assembleCircuit(props.result.circuit);
+        if (Array.isArray(r)) runtimeErrors = r;
+    } catch (e) {
+        thrown = e as Error;
     }
+    if (!runtimeErrors.length) {
+        const fallback = (window as any).__copilotLastAssemblyErrors;
+        if (Array.isArray(fallback) && fallback.length) runtimeErrors = fallback;
+    }
+    if (thrown) {
+        runtimeErrors.push({
+            component: undefined,
+            message: `assembleCircuit threw: ${thrown.message || String(thrown)}`,
+            severity: 'error',
+        });
+    }
+    runtimeAssemblyErrors.value = runtimeErrors.map(e => ({
+        component: e.component,
+        message: e.message,
+        severity: e.severity,
+    }));
 }
 
 onMounted(() => {

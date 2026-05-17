@@ -62,13 +62,18 @@ function recordToast(
     currentErrorLog.push({ component, message, severity });
 }
 
-// v2.4.7: silent diagnostic — appends to the chat-panel "Assembly Notices"
-// banner WITHOUT firing a toast (so the UI isn't spammed with 30+ flash
-// messages). Severity 'info' so it shows with the ℹ icon. Use this for
-// granular trace entries that the user needs to see for debugging.
+// v2.4.7 → v2.4.9: per-step diagnostic tracing.
+//   • Always emits to console (cheap, only visible if F12 dev tools open).
+//   • Only appends to the chat-panel "Assembly Notices" banner when
+//     VERBOSE_DIAG is true. Default false to avoid spamming the panel with
+//     30+ info entries on every successful run. Flip to true and rebuild
+//     when debugging a placement/wire failure.
+const VERBOSE_DIAG = false;
 function recordDiag(message: string, component?: string) {
-    console.log(`[AICOPILOT v2.4.7] ${component ? `[${component}] ` : ''}${message}`);
-    currentErrorLog.push({ component, message: `[diag] ${message}`, severity: 'info' });
+    console.log(`[AICOPILOT] ${component ? `[${component}] ` : ''}${message}`);
+    if (VERBOSE_DIAG) {
+        currentErrorLog.push({ component, message: `[diag] ${message}`, severity: 'info' });
+    }
 }
 
 const applyOffset = (x: number, y: number, offset: Offset) => {
@@ -114,42 +119,39 @@ function withTimeout<T>(
 }
 
 const placeComponent = async (data: { libraryUuid: string, uuid: string }, { x, y, rotate }: { x: number, y: number, rotate?: number }) => {
-    // Always try multiple library UUIDs — in online mode the string 'lcsc' is
-    // not a real UUID so we must also probe the known LCSC library UUIDs.
-    const maybeLibUuid = [...new Set([
-        data.libraryUuid,
-        '0819f05c4eef4c71ace90d822a990e87',
-        'f5af0881d090439f925343ec8aedf154',
-    ])];
+    // v2.4.9: match the biosshot/easyeda-copilot reference behaviour.
+    //   ONLINE  → trust the libraryUuid the backend / frontend resolver gave us.
+    //             Looping fallbacks here mask the real bug ("the resolver
+    //             handed us a bogus libraryUuid") and waste create() calls.
+    //   OFFLINE → no resolver runs, so probe the two known LCSC library UUIDs
+    //             plus whatever string was passed (commonly 'lcsc'). This is
+    //             biosshot's offline pattern verbatim.
+    const maybeLibUuid = isOffline
+        ? [...new Set([
+              '0819f05c4eef4c71ace90d822a990e87',
+              'f5af0881d090439f925343ec8aedf154',
+              data.libraryUuid,
+          ])]
+        : [data.libraryUuid];
 
     let comp;
-
     for (const lib of maybeLibUuid) {
         try {
             const compPromise = eda.sch_PrimitiveComponent.create({
                 uuid: data.uuid,
                 libraryUuid: lib,
-            },
-                to2(x),
-                to2(y),
-                undefined, rotate
-            );
+            }, to2(x), to2(y), undefined, rotate);
 
-            if (isOffline)
-                comp = await withTimeout(compPromise, 25000);
-            else
-                comp = await compPromise;
-
+            comp = isOffline
+                ? await withTimeout(compPromise, 25000)
+                : await compPromise;
         } catch (error) {
             comp = undefined;
         }
-
         if (comp) break;
     }
 
     if (!comp) throw new Error("Component not found");
-    // eda.sys_Message.showToastMessage(`Component ${component.designator} place at ${x} ${y}`, ESYS_ToastMessageType.SUCCESS);
-
     return comp as ISCH_PrimitiveComponent | ISCH_PrimitiveComponent_2;
 };
 

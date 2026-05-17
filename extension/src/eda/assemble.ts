@@ -62,6 +62,15 @@ function recordToast(
     currentErrorLog.push({ component, message, severity });
 }
 
+// v2.4.7: silent diagnostic — appends to the chat-panel "Assembly Notices"
+// banner WITHOUT firing a toast (so the UI isn't spammed with 30+ flash
+// messages). Severity 'info' so it shows with the ℹ icon. Use this for
+// granular trace entries that the user needs to see for debugging.
+function recordDiag(message: string, component?: string) {
+    console.log(`[AICOPILOT v2.4.7] ${component ? `[${component}] ` : ''}${message}`);
+    currentErrorLog.push({ component, message: `[diag] ${message}`, severity: 'info' });
+}
+
 const applyOffset = (x: number, y: number, offset: Offset) => {
 
     if (offset.x) x = offset.x + x;
@@ -306,13 +315,12 @@ async function createComponet(component: CircuitAssembly['components'][0], offse
 }
 
 async function placeComponents(components: CircuitAssembly['components'], offset: Offset = { x: 0, y: 0 }): Promise<PlacedComponents> {
-    console.log(`[AICOPILOT v2.4.6] placeComponents() starting — ${components.length} components, offset:`, offset);
+    recordDiag(`placeComponents starting — ${components.length} components, offset (${offset.x}, ${offset.y})`);
     const placedComponentsP = components.map(async (component) => {
         const { part_uuid: partUuid, designator } = component;
         const libUuid = (component as any)._libraryUuid;
-        console.log(`[AICOPILOT v2.4.6] [${designator}] part_uuid=${partUuid} _libraryUuid=${libUuid}`);
+        recordDiag(`input: part_uuid=${partUuid?.substring(0, 8)}… _libraryUuid=${libUuid ? libUuid.substring(0, 8) + '…' : 'NONE'}`, designator);
 
-        // v2.4.4: Try real symbol first (if we have a UUID)
         if (partUuid) {
             try {
                 const placedComponent = await createComponet(component, offset);
@@ -320,37 +328,34 @@ async function placeComponents(components: CircuitAssembly['components'], offset
                     const primitiveId = placedComponent.getState_PrimitiveId();
                     const pins = await getPrimitiveComponentPins(primitiveId);
                     await placedComponent.done();
-                    console.log(`[AICOPILOT v2.4.6] [${designator}] REAL SYMBOL OK — primitive_id=${primitiveId}, ${pins.length} pins`);
-                    pins.forEach(p => {
-                        try {
-                            console.log(`  pin ${p.getState_PinNumber()} (${p.getState_PinName()}) at (${p.getState_X()}, ${p.getState_Y()})`);
-                        } catch (e) { console.log(`  pin <introspect failed>`, e); }
-                    });
+                    const pinSummary = pins.map(p => {
+                        try { return `${p.getState_PinNumber()}@(${p.getState_X()},${p.getState_Y()})`; }
+                        catch { return '?'; }
+                    }).join(' ');
+                    recordDiag(`REAL OK — ${pins.length} pins: ${pinSummary}`, designator);
                     return { primitive_id: primitiveId, pins, designator };
                 }
-                console.log(`[AICOPILOT v2.4.6] [${designator}] REAL SYMBOL returned undefined`);
+                recordDiag(`REAL returned undefined`, designator);
             } catch (err) {
                 const eMes = (err instanceof Error) ? err.message : String(err);
-                console.warn(`[AICOPILOT v2.4.6] [${designator}] REAL SYMBOL FAIL: ${eMes}. Falling back to generic.`);
+                recordDiag(`REAL FAIL: ${eMes}. Trying generic.`, designator);
             }
         }
 
-        // Generic rectangle fallback
         try {
             const generic = await placeGenericSymbol(component, offset);
             if (generic) {
-                console.log(`[AICOPILOT v2.4.6] [${designator}] GENERIC OK — primitive_id=${generic.primitive_id}, ${generic.pins.length} pins`);
-                recordToast(
-                    `${designator}: placed generic symbol (LCSC not found)`,
-                    'info',
-                    designator,
-                );
+                const pinSummary = generic.pins.map(p => {
+                    try { return `${p.getState_PinNumber()}@(${p.getState_X()},${p.getState_Y()})`; }
+                    catch { return '?'; }
+                }).join(' ');
+                recordDiag(`GENERIC OK — ${generic.pins.length} pins: ${pinSummary}`, designator);
                 return generic;
             }
-            console.warn(`[AICOPILOT v2.4.6] [${designator}] GENERIC returned undefined`);
+            recordDiag(`GENERIC returned undefined`, designator);
         } catch (err) {
             const eMes = (err instanceof Error) ? err.message : String(err);
-            console.error(`[AICOPILOT v2.4.6] [${designator}] GENERIC FAIL: ${eMes}`);
+            recordDiag(`GENERIC FAIL: ${eMes}`, designator);
             recordToast(`Component error ${designator}: ${eMes}`, 'error', designator);
         }
 
@@ -473,8 +478,7 @@ async function drawEdges(edges: CircuitAssembly['edges'], components: CircuitAss
         return srcPinPos;
     }
 
-    console.log(`[AICOPILOT v2.4.6] drawEdges() starting — ${edges.length} edges, offset:`, offset);
-    console.log(`[AICOPILOT v2.4.6] placedComps keys:`, Object.keys(placeComponents));
+    recordDiag(`drawEdges starting — ${edges.length} edges, placed=${Object.keys(placeComponents).join(',')}`);
     let edgeIdx = 0;
     for (const edge of edges) {
         for (const section of edge.sections ?? []) {
@@ -485,12 +489,14 @@ async function drawEdges(edges: CircuitAssembly['edges'], components: CircuitAss
             if (!signalName) signalName = searchSignalName(tdesignator, tpin);
 
             const netName = signalName ?? 'unknown net';
-            console.log(`[AICOPILOT v2.4.6] [edge#${edgeIdx}] ${sdesignator}.${spin} -> ${tdesignator}.${tpin} (net=${netName})`);
+            recordDiag(`edge#${edgeIdx} ${sdesignator}.${spin} -> ${tdesignator}.${tpin} (net=${netName})`);
 
             const srcpin = await findPin(sdesignator, { num: spin, name: searchPinName(sdesignator, spin) }, placeComponents);
             const trgpin = await findPin(tdesignator, { num: tpin, name: searchPinName(tdesignator, tpin) }, placeComponents);
 
-            console.log(`  srcpin=${srcpin ? 'FOUND' : 'NULL'}${srcpin ? ` at (${srcpin.pin.getState_X()}, ${srcpin.pin.getState_Y()})` : ''}, trgpin=${trgpin ? 'FOUND' : 'NULL'}${trgpin ? ` at (${trgpin.pin.getState_X()}, ${trgpin.pin.getState_Y()})` : ''}`);
+            const srcInfo = srcpin ? `FOUND@(${srcpin.pin.getState_X()},${srcpin.pin.getState_Y()})` : 'NULL';
+            const trgInfo = trgpin ? `FOUND@(${trgpin.pin.getState_X()},${trgpin.pin.getState_Y()})` : 'NULL';
+            recordDiag(`  src=${srcInfo} trg=${trgInfo}`);
 
             if (!srcpin) recordToast(`Wire error not found pin: ${spin} ${sdesignator}`, 'warning', sdesignator);
             if (!trgpin) recordToast(`Wire error not found pin: ${tpin} ${tdesignator}`, 'warning', tdesignator);
@@ -534,12 +540,12 @@ async function drawEdges(edges: CircuitAssembly['edges'], components: CircuitAss
 
             values = filterUniqueCoordinatePairs(values);
 
-            console.log(`  WIRE CREATE attempt: values=${JSON.stringify(values)} net=${netName}`);
+            recordDiag(`  wire.create values=${JSON.stringify(values)} net=${netName}`);
             try {
                 const wire = await eda.sch_PrimitiveWire.create(values, netName);
-                console.log(`  WIRE CREATE ${wire ? 'OK' : 'returned undefined'} for net ${netName}`);
+                recordDiag(`  wire.create ${wire ? 'OK' : 'returned undefined'} (${netName})`);
             } catch (err) {
-                console.error(`  WIRE CREATE THREW for net ${netName}:`, err);
+                recordDiag(`  wire.create THREW (${netName}): ${(err as Error).message}`);
                 // v2.3.8/2.3.9: wire.create() can fail when the routed path
                 // crosses an unrelated component body or when the computed
                 // endpoint doesn't snap precisely onto a pin. Recover by
